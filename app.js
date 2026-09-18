@@ -1,3 +1,29 @@
+import { clamp, daysBetween, formatDateInput } from "./src/domain/date.js";
+import { buildForecast as buildForecastDomain } from "./src/domain/forecast.js";
+import { simulateFundingCoverage } from "./src/domain/funding.js";
+import { compareAuditRuns } from "./src/domain/comparison.js";
+import { applyBankUpdateToPriorLedger, canonicalLedgerForRun } from "./src/domain/daily-ledger.js";
+import { buildOperatorBrief } from "./src/domain/operator-brief.js";
+import { AuditRunController, MODEL_VERSIONS, RUN_STATUS, SIGN_OFF_STATUS, getCfoReadiness } from "./src/domain/run.js";
+import { scoreReceipt as scoreReceiptDomain } from "./src/domain/timing-model.js";
+import { normalizeDate, parseOutflows, parseReceipts } from "./src/io/schema.js";
+import {
+  SnapshotValidationError,
+  createAuditSnapshot,
+  parseAuditSnapshot,
+  sha256Hex
+} from "./src/io/snapshot.js";
+import { ExcelIntakeError, readExcelFile } from "./src/io/xlsx.js";
+import { buildCommittedRunCsv } from "./src/io/csv.js";
+import {
+  createElement,
+  createPill,
+  createSvgElement,
+  createTableCell,
+  createTextElement,
+  replaceChildren
+} from "./src/ui/render.js";
+
 const RUB = new Intl.NumberFormat("ru-RU", {
   style: "currency",
   currency: "RUB",
@@ -5,23 +31,58 @@ const RUB = new Intl.NumberFormat("ru-RU", {
 });
 
 const DATE = new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "short" });
+const MOSCOW_DATE_TIME = new Intl.DateTimeFormat("ru-RU", {
+  timeZone: "Europe/Moscow",
+  day: "2-digit",
+  month: "2-digit",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit"
+});
 
 const demoForecastStartDate = new Date("2026-06-30T00:00:00");
 let forecastStartDate = new Date(demoForecastStartDate);
-const msDay = 24 * 60 * 60 * 1000;
+
+function createFundingState() {
+  return {
+    liquidityReserve: 0,
+    reserveAvailableDate: null,
+    reserveLeadDays: 0,
+    reserveTermDays: null,
+    reserveRatePct: null,
+    reserveMinDraw: 0,
+    paymentMoveDays: null,
+    paymentMoveCost: null,
+    factoringLimit: 0,
+    factoringAvailableDate: null,
+    factoringLeadDays: null,
+    factoringTermDays: null,
+    factoringFeePct: null,
+    factoringMinDraw: 0,
+    overdraftLimit: 0,
+    overdraftAvailableDate: null,
+    overdraftLeadDays: null,
+    overdraftTermDays: null,
+    overdraftRatePct: null,
+    overdraftMinDraw: 0,
+    creditLineLimit: 0,
+    creditLineAvailableDate: null,
+    creditLineLeadDays: null,
+    creditLineTermDays: null,
+    creditLineRatePct: null,
+    creditLineMinDraw: 0
+  };
+}
 
 const state = {
   scenario: "p50",
   stress: false,
   openingBalance: 500_000,
-  funding: {
-    overdraftLimit: 0,
-    factoringLimit: 0,
-    creditLineLimit: 0,
-    liquidityReserve: 0
-  },
+  funding: createFundingState(),
   receipts: [],
   outflows: [],
+  canonicalLedger: null,
+  dataSources: [{ type: "demo", name: "Модель ООО Ромашка" }],
   importReport: {
     errors: [],
     warnings: [],
@@ -29,10 +90,15 @@ const state = {
   }
 };
 
+const runController = new AuditRunController();
+let priorSnapshot = null;
+let selectedPriorLedger = null;
+let fundingProvenance = { inputSource: "Ручной ввод в интерфейсе", sourceRunId: null, sourceCreatedAt: null, sourceAsOfDate: null };
+
 const scenarioLabels = {
-  p50: "P50",
-  p80: "P80",
-  p90: "P90",
+  p50: "Базовый P50",
+  p80: "С запасом P80",
+  p90: "Консервативный P90",
   stress: "Стресс"
 };
 
@@ -70,21 +136,21 @@ function loadDemo() {
   state.scenario = "p50";
   state.stress = false;
   state.openingBalance = 500_000;
-  state.funding = {
-    overdraftLimit: 0,
-    factoringLimit: 0,
-    creditLineLimit: 0,
-    liquidityReserve: 0
-  };
-  state.receipts = parseReceipts(demoReceipts);
-  state.outflows = parseOutflows(demoOutflows);
+  state.funding = createFundingState();
+  fundingProvenance = { inputSource: "Ручной ввод в интерфейсе", sourceRunId: null, sourceCreatedAt: null, sourceAsOfDate: null };
+  state.receipts = parseReceipts(demoReceipts, forecastStartDate);
+  state.outflows = parseOutflows(demoOutflows, forecastStartDate);
+  state.canonicalLedger = null;
+  state.dataSources = [{ type: "demo", name: "Модель ООО Ромашка" }];
   syncBalanceControls("Модель ООО Ромашка: стартовый остаток 500 000 руб., дата старта 30 июня 2026.");
   syncFundingControls();
   const excelInput = document.querySelector("#excelInput");
   if (excelInput) {
     excelInput.value = "";
   }
-  setUploadStatus("Используются демо-данные. Можно загрузить типовой Excel и пересчитать модель.", "neutral");
+  const fileName = document.querySelector("#selectedFileName");
+  if (fileName) fileName.textContent = "Добавьте Excel для расчета";
+  setUploadStatus("Поступления, обязательные платежи и стартовый остаток.", "neutral");
   resetImportReport("Демо-пример: июнь 2026. Для реального аудита загрузите выгрузку или задайте дату и остаток вручную.");
 }
 
@@ -99,15 +165,718 @@ function syncBalanceControls(sourceText) {
 
 function syncFundingControls() {
   const bindings = {
-    overdraftLimitInput: state.funding.overdraftLimit,
+    liquidityReserveInput: state.funding.liquidityReserve,
+    reserveAvailableDateInput: state.funding.reserveAvailableDate,
+    reserveLeadDaysInput: state.funding.reserveLeadDays,
+    reserveTermDaysInput: state.funding.reserveTermDays,
+    reserveRatePctInput: state.funding.reserveRatePct,
+    reserveMinDrawInput: state.funding.reserveMinDraw,
+    paymentMoveDaysInput: state.funding.paymentMoveDays,
+    paymentMoveCostInput: state.funding.paymentMoveCost,
     factoringLimitInput: state.funding.factoringLimit,
+    factoringAvailableDateInput: state.funding.factoringAvailableDate,
+    factoringLeadDaysInput: state.funding.factoringLeadDays,
+    factoringTermDaysInput: state.funding.factoringTermDays,
+    factoringFeePctInput: state.funding.factoringFeePct,
+    factoringMinDrawInput: state.funding.factoringMinDraw,
+    overdraftLimitInput: state.funding.overdraftLimit,
+    overdraftAvailableDateInput: state.funding.overdraftAvailableDate,
+    overdraftLeadDaysInput: state.funding.overdraftLeadDays,
+    overdraftTermDaysInput: state.funding.overdraftTermDays,
+    overdraftRatePctInput: state.funding.overdraftRatePct,
+    overdraftMinDrawInput: state.funding.overdraftMinDraw,
     creditLineLimitInput: state.funding.creditLineLimit,
-    liquidityReserveInput: state.funding.liquidityReserve
+    creditLineAvailableDateInput: state.funding.creditLineAvailableDate,
+    creditLineLeadDaysInput: state.funding.creditLineLeadDays,
+    creditLineTermDaysInput: state.funding.creditLineTermDays,
+    creditLineRatePctInput: state.funding.creditLineRatePct,
+    creditLineMinDrawInput: state.funding.creditLineMinDraw
   };
   Object.entries(bindings).forEach(([id, value]) => {
     const input = document.querySelector(`#${id}`);
-    if (input) input.value = String(Math.round(value));
+    if (!input) return;
+    input.value = value instanceof Date ? formatDateInput(value) : value === null ? "" : String(value);
   });
+}
+
+function rublesToMinor(value) {
+  return Math.round(Math.max(0, Number(value) || 0) * 100);
+}
+
+function percentToBps(value) {
+  return value === null || value === "" ? null : Math.round(Number(value) * 100);
+}
+
+function fundingSources(funding = state.funding, asOfDate = forecastStartDate) {
+  const common = { ...fundingProvenance };
+  return [
+    {
+      ...common,
+      id: "reserve",
+      type: "reserve",
+      name: "Резерв ликвидности",
+      priority: 1,
+      limitMinor: rublesToMinor(funding.liquidityReserve),
+      availabilityDate: funding.reserveAvailableDate,
+      leadTimeDays: funding.reserveLeadDays,
+      termDays: funding.reserveTermDays,
+      annualRateBps: percentToBps(funding.reserveRatePct),
+      minDrawMinor: rublesToMinor(funding.reserveMinDraw),
+      constraints: ["В пределах подтвержденного свободного резерва"]
+    },
+    {
+      ...common,
+      id: "payment-move",
+      type: "payment-move",
+      name: "Перенос некритичных платежей",
+      priority: 2,
+      availabilityDate: asOfDate,
+      leadTimeDays: 0,
+      maxMoveDays: funding.paymentMoveDays,
+      fixedCostMinor: funding.paymentMoveCost === null ? null : rublesToMinor(funding.paymentMoveCost),
+      constraints: ["Только платежи с критичностью moveable"]
+    },
+    {
+      ...common,
+      id: "factoring",
+      type: "factoring",
+      name: "Факторинг",
+      priority: 3,
+      limitMinor: rublesToMinor(funding.factoringLimit),
+      availabilityDate: funding.factoringAvailableDate,
+      leadTimeDays: funding.factoringLeadDays,
+      termDays: funding.factoringTermDays,
+      feeBps: percentToBps(funding.factoringFeePct),
+      minDrawMinor: rublesToMinor(funding.factoringMinDraw),
+      constraints: ["Документы в порядке", "Банковский матчинг подтвержден"]
+    },
+    {
+      ...common,
+      id: "overdraft",
+      type: "overdraft",
+      name: "Овердрафт",
+      priority: 4,
+      limitMinor: rublesToMinor(funding.overdraftLimit),
+      availabilityDate: funding.overdraftAvailableDate,
+      leadTimeDays: funding.overdraftLeadDays,
+      termDays: funding.overdraftTermDays,
+      annualRateBps: percentToBps(funding.overdraftRatePct),
+      minDrawMinor: rublesToMinor(funding.overdraftMinDraw),
+      constraints: ["В пределах доступного банковского лимита"]
+    },
+    {
+      ...common,
+      id: "credit-line",
+      type: "credit-line",
+      name: "Кредитная линия",
+      priority: 5,
+      limitMinor: rublesToMinor(funding.creditLineLimit),
+      availabilityDate: funding.creditLineAvailableDate,
+      leadTimeDays: funding.creditLineLeadDays,
+      termDays: funding.creditLineTermDays,
+      annualRateBps: percentToBps(funding.creditLineRatePct),
+      minDrawMinor: rublesToMinor(funding.creditLineMinDraw),
+      constraints: ["В пределах подтвержденного лимита кредитной линии"]
+    }
+  ];
+}
+
+function dateOnly(value) {
+  return value instanceof Date ? formatDateInput(value) : String(value ?? "");
+}
+
+function receiptToRunInput(receipt) {
+  const amountMinor = Number.isSafeInteger(receipt.remainingAmountMinor)
+    ? receipt.remainingAmountMinor
+    : Number.isSafeInteger(receipt.amountMinor)
+      ? receipt.amountMinor
+      : rublesToMinor(receipt.amount);
+  return {
+    id: receipt.id,
+    counterpartyId: receipt.counterpartyId ?? null,
+    counterparty: receipt.counterparty,
+    amountMinor,
+    remainingAmountMinor: amountMinor,
+    openArMinor: Number.isSafeInteger(receipt.openArMinor) ? receipt.openArMinor : rublesToMinor(receipt.openAr),
+    plannedDate: dateOnly(receipt.plannedDate),
+    dueDays: receipt.dueDays ?? 0,
+    avgDelay: receipt.avgDelay ?? null,
+    late5: receipt.late5 ?? 0,
+    late10: receipt.late10 ?? 0,
+    late30: receipt.late30 ?? 0,
+    documentsOk: receipt.documentsOk !== false,
+    bankMatch: receipt.bankMatch !== false,
+    historyTotal: receipt.historyTotal ?? null,
+    historyOnTime: receipt.historyOnTime ?? null,
+    historyAvgDelay: receipt.historyAvgDelay ?? null,
+    historyWorstDelay: receipt.historyWorstDelay ?? null,
+    historyDelays: [...(receipt.historyDelays ?? [])],
+    portfolioDelays: [...(receipt.portfolioDelays ?? [])],
+    managerPromise: receipt.managerPromise ?? null,
+    manualException: receipt.manualException ?? null
+  };
+}
+
+function outflowToRunInput(outflow, index) {
+  const effectiveDate = outflow.effectiveDate ?? outflow.date;
+  return {
+    outflowId: outflow.outflowId ?? `outflow-${index + 1}`,
+    category: outflow.category,
+    amountMinor: Number.isSafeInteger(outflow.amountMinor) ? outflow.amountMinor : rublesToMinor(outflow.amount),
+    effectiveDate: dateOnly(effectiveDate),
+    criticality: outflow.criticality ?? "must-pay"
+  };
+}
+
+function fundingSourceToRunInput(source) {
+  return Object.fromEntries(Object.entries(source).map(([key, value]) => [
+    key,
+    value instanceof Date ? dateOnly(value) : Array.isArray(value) ? [...value] : value
+  ]));
+}
+
+function buildRunInputs({ receipts, outflows, asOfDate, openingBalance, funding, scenario, canonicalLedger }) {
+  const inputs = {
+    asOfDate: dateOnly(asOfDate),
+    scenario,
+    horizonDays: 30,
+    currency: "RUB",
+    openingBalanceMinor: canonicalLedger?.openingBalanceMinor ?? rublesToMinor(openingBalance),
+    receipts: receipts.map(receiptToRunInput),
+    outflows: outflows.map(outflowToRunInput),
+    fundingSources: fundingSources(funding, asOfDate).map(fundingSourceToRunInput)
+  };
+  if (canonicalLedger) inputs.canonicalLedger = canonicalLedger;
+  return inputs;
+}
+
+function hydrateRunInputs(inputs) {
+  const asOfDate = normalizeDate(inputs.asOfDate);
+  if (!asOfDate) throw new Error("Файл расчета содержит некорректную дату данных.");
+  const receipts = inputs.receipts.map((receipt) => {
+    const plannedDate = normalizeDate(receipt.plannedDate);
+    if (!plannedDate) throw new Error(`Файл расчета: некорректная дата ДЗ ${receipt.id}.`);
+    return {
+      ...receipt,
+      amount: receipt.amountMinor / 100,
+      openAr: receipt.openArMinor / 100,
+      plannedDate
+    };
+  });
+  const outflows = inputs.outflows.map((outflow) => {
+    const effectiveDate = normalizeDate(outflow.effectiveDate);
+    if (!effectiveDate) throw new Error(`Файл расчета: некорректная дата платежа ${outflow.outflowId}.`);
+    return { ...outflow, amount: outflow.amountMinor / 100, date: effectiveDate, effectiveDate };
+  });
+  const sources = inputs.fundingSources.map((source) => ({
+    ...source,
+    availabilityDate: normalizeDate(source.availabilityDate)
+  }));
+  return { ...inputs, asOfDate, receipts, outflows, fundingSources: sources };
+}
+
+function fundingStateFromSources(sources) {
+  const next = createFundingState();
+  const byType = Object.fromEntries(sources.map((source) => [source.type, source]));
+  const reserve = byType.reserve;
+  if (reserve) {
+    next.liquidityReserve = reserve.limitMinor / 100;
+    next.reserveAvailableDate = reserve.availabilityDate;
+    next.reserveLeadDays = reserve.leadTimeDays;
+    next.reserveTermDays = reserve.termDays;
+    next.reserveRatePct = reserve.annualRateBps === null ? null : reserve.annualRateBps / 100;
+    next.reserveMinDraw = reserve.minDrawMinor / 100;
+  }
+  const move = byType["payment-move"];
+  if (move) {
+    next.paymentMoveDays = move.maxMoveDays;
+    next.paymentMoveCost = move.fixedCostMinor === null ? null : move.fixedCostMinor / 100;
+  }
+  const factoring = byType.factoring;
+  if (factoring) {
+    next.factoringLimit = factoring.limitMinor / 100;
+    next.factoringAvailableDate = factoring.availabilityDate;
+    next.factoringLeadDays = factoring.leadTimeDays;
+    next.factoringTermDays = factoring.termDays;
+    next.factoringFeePct = factoring.feeBps === null ? null : factoring.feeBps / 100;
+    next.factoringMinDraw = factoring.minDrawMinor / 100;
+  }
+  [["overdraft", "overdraft"], ["credit-line", "creditLine"]].forEach(([type, prefix]) => {
+    const source = byType[type];
+    if (!source) return;
+    next[`${prefix}Limit`] = source.limitMinor / 100;
+    next[`${prefix}AvailableDate`] = source.availabilityDate;
+    next[`${prefix}LeadDays`] = source.leadTimeDays;
+    next[`${prefix}TermDays`] = source.termDays;
+    next[`${prefix}RatePct`] = source.annualRateBps === null ? null : source.annualRateBps / 100;
+    next[`${prefix}MinDraw`] = source.minDrawMinor / 100;
+  });
+  return next;
+}
+
+function scoreReceiptForRun(receipt, receipts, asOfDate) {
+  const portfolioDelays = receipt.portfolioDelays?.length
+    ? receipt.portfolioDelays
+    : receipts.filter((item) => item.counterparty !== receipt.counterparty).flatMap((item) => item.historyDelays ?? []);
+  return scoreReceiptDomain(receipt, { formatDate: dateOnly, asOfDate, portfolioDelays });
+}
+
+function fundingActionOutput(action) {
+  return {
+    sourceId: action.sourceId,
+    type: action.type,
+    name: action.name,
+    status: action.status,
+    reason: action.reason,
+    targetId: action.targetId ?? null,
+    targetIds: action.targetIds ?? [],
+    appliedAmountMinor: action.appliedAmountMinor,
+    effectiveDate: action.effectiveDateIso,
+    movedToDate: action.movedToDateIso ?? null,
+    repaymentDate: action.repaymentDateIso ?? null,
+    termDays: action.termDays,
+    costMinor: action.costMinor,
+    costFormula: action.costFormula,
+    limitMinor: action.limitMinor,
+    usedLimitMinor: action.usedLimitMinor,
+    remainingLimitMinor: action.remainingLimitMinor,
+    constraints: action.constraints,
+    inputSource: action.inputSource,
+    remainingGapMinor: action.remainingGapMinor,
+    affectedDates: action.affectedDates
+  };
+}
+
+function calculateRun(inputs) {
+  const hydrated = hydrateRunInputs(inputs);
+  const scored = hydrated.receipts.map((receipt) => scoreReceiptForRun(receipt, hydrated.receipts, hydrated.asOfDate));
+  const forecast = buildForecastDomain({
+    scored,
+    scenario: hydrated.scenario,
+    forecastStartDate: hydrated.asOfDate,
+    horizonDays: hydrated.horizonDays,
+    outflows: hydrated.outflows,
+    openingBalanceMinor: hydrated.openingBalanceMinor
+  });
+  const funding = simulateFundingCoverage({
+    forecast,
+    receipts: scored,
+    outflows: hydrated.outflows,
+    sources: hydrated.fundingSources,
+    asOfDate: hydrated.asOfDate,
+    scenario: hydrated.scenario
+  });
+  const outputs = {
+    scenarioDates: scored.map((receipt) => ({
+      id: receipt.id,
+      plannedDate: dateOnly(receipt.plannedDate),
+      p50Date: dateOnly(receipt.p50Date),
+      p80Date: dateOnly(receipt.p80Date),
+      p90Date: dateOnly(receipt.p90Date),
+      stressDate: dateOnly(receipt.stressDate),
+      p50Delay: receipt.p50Delay,
+      p80Delay: receipt.p80Delay,
+      p90Delay: receipt.p90Delay,
+      stressDelay: receipt.stressDelay,
+      modelSource: receipt.modelSource,
+      noOwnHistory: receipt.noOwnHistory
+    })),
+    calendar: forecast.map((day) => ({
+      date: day.dateIso,
+      openingBalanceMinor: day.openingBalanceMinor,
+      plannedInMinor: day.plannedInMinor,
+      scenarioInflowMinor: day.scenarioInflowMinor,
+      outflowMinor: day.outflowMinor,
+      closingBalanceMinor: day.closingBalanceMinor,
+      financingNeedMinor: day.financingNeedMinor
+    })),
+    excludedEvents: forecast.report.excluded.map((item) => ({ ...item, date: item.dateIso })),
+    funding: {
+      actions: funding.actions.map(fundingActionOutput),
+      totalCostMinor: funding.totalCostMinor,
+      uncoveredNeedMinor: funding.uncoveredNeedMinor,
+      affectedDates: funding.affectedDates,
+      fullyCovered: funding.fullyCovered
+    }
+  };
+  return { hydrated, scored, forecast, funding, outputs };
+}
+
+function currentCandidate(sourceOverride = null) {
+  const staged = sourceOverride ?? runController.view().staged?.data;
+  return {
+    receipts: staged?.receipts ?? state.receipts,
+    outflows: staged?.outflows ?? state.outflows,
+    asOfDate: staged?.asOfDate ?? forecastStartDate,
+    openingBalance: staged?.openingBalance ?? state.openingBalance,
+    funding: state.funding,
+    scenario: state.scenario,
+    dataSources: staged?.dataSources ?? state.dataSources,
+    qualityReport: staged?.qualityReport ?? state.importReport,
+    canonicalLedger: staged && Object.hasOwn(staged, "canonicalLedger") ? staged.canonicalLedger : state.canonicalLedger
+  };
+}
+
+function applyCommittedInputs(inputs, dataSources, qualityReport) {
+  const hydrated = hydrateRunInputs(inputs);
+  forecastStartDate = hydrated.asOfDate;
+  state.scenario = hydrated.scenario;
+  state.stress = hydrated.scenario === "stress";
+  state.openingBalance = hydrated.openingBalanceMinor / 100;
+  state.receipts = hydrated.receipts;
+  state.outflows = hydrated.outflows;
+  state.canonicalLedger = inputs.canonicalLedger ?? null;
+  state.funding = fundingStateFromSources(hydrated.fundingSources);
+  const provenanceSource = hydrated.fundingSources.find((source) => source.sourceRunId || source.inputSource);
+  fundingProvenance = provenanceSource ? {
+    inputSource: provenanceSource.inputSource ?? "Файл расчета",
+    sourceRunId: provenanceSource.sourceRunId ?? null,
+    sourceCreatedAt: provenanceSource.sourceCreatedAt ?? null,
+    sourceAsOfDate: provenanceSource.sourceAsOfDate ?? null
+  } : { inputSource: "Ручной ввод в интерфейсе", sourceRunId: null, sourceCreatedAt: null, sourceAsOfDate: null };
+  state.dataSources = dataSources;
+  state.importReport = qualityReport;
+  const bankSource = dataSources.findLast((source) => source.bankBalanceCloseDate && !source.inheritedFromRunId);
+  syncBalanceControls(bankSource
+    ? `Банк: остаток на конец ${bankSource.bankBalanceCloseDate}; дата расчета ${inputs.asOfDate}. Получено ${bankSource.observedAt}.`
+    : "Источник: последний успешно зафиксированный расчет.");
+  syncFundingControls();
+  setScenario(state.scenario);
+}
+
+const runStatusLabels = {
+  [RUN_STATUS.UNCOMPUTED]: ["Данные не рассчитаны", "neutral"],
+  [RUN_STATUS.STAGED]: ["Данные подготовлены", "prepared"],
+  [RUN_STATUS.RUNNING]: ["Расчет выполняется", "running"],
+  [RUN_STATUS.CURRENT]: ["Расчет актуален", "current"],
+  [RUN_STATUS.STALE]: ["Результат устарел", "stale"],
+  [RUN_STATUS.ERROR]: ["Ошибка расчета", "error"]
+};
+
+function briefDate(value) {
+  const date = normalizeDate(value);
+  return date ? DATE.format(date) : value ?? "не указана";
+}
+
+function renderOperatorBrief() {
+  const container = document.querySelector("#operatorBriefContent");
+  const mode = document.querySelector("#briefMode");
+  if (!container) return;
+  const view = runController.view();
+  const brief = buildOperatorBrief(view.committed, priorSnapshot?.run ?? null);
+  if (!brief) {
+    if (mode) mode.textContent = "Нет расчета";
+    replaceChildren(container, [createTextElement(document, "p", "Загрузите данные и выполните расчет.", { className: "empty-state" })]);
+    return;
+  }
+  if (mode) mode.textContent = brief.isDemo ? "Демо" : view.visibleRunIsPrevious ? "Предыдущий расчет" : "Зафиксированный расчет";
+  const sourceLine = brief.bank
+    ? `Банк: остаток на конец ${briefDate(brief.bank.closeDate)}; получен ${brief.bank.observedAt ? `${MOSCOW_DATE_TIME.format(new Date(brief.bank.observedAt))} МСК` : "без времени получения"}. Не внутридневной остаток.`
+    : "Банковский факт не подключен. Остаток взят из демо, Excel или интерфейса.";
+  const planningLine = brief.planning
+    ? `ДЗ и исходящие: срез ${briefDate(brief.planning.asOfDate)} · ${brief.planning.ageWorkingDays} раб. дн. назад${brief.planning.inheritedFromRunId ? " · перенесен из прошлого расчета" : ""}.`
+    : "Дата обновления ДЗ и исходящих не подтверждена.";
+  const status = createElement(document, "div", { className: "operator-brief-status" },
+    createTextElement(document, "strong", `${briefDate(brief.asOfDate)} · ${scenarioLabel(brief.scenario)}`),
+    createTextElement(document, "small", `Run ${brief.runId} · ${brief.currency}`),
+    createTextElement(document, "span", sourceLine),
+    createTextElement(document, "span", planningLine));
+  if (brief.forecastStatus === "requires-planning-update") {
+    const blocker = createElement(document, "div", { className: "operator-brief-blocker", role: "alert" },
+      createTextElement(document, "strong", "Требует обновления"),
+      createTextElement(document, "span", `Плановые ДЗ и исходящие старше ${brief.planning.maxAgeWorkingDays} рабочих дней.`),
+      createTextElement(document, "span", "Загрузите свежую полную книгу. Прогноз на устаревших плановых данных не считается актуальным."));
+    replaceChildren(container, [status, blocker]);
+    return;
+  }
+  const gapLabel = brief.firstGapDate
+    ? `${briefDate(brief.firstGapDate)}${brief.riskWindowEndDate && brief.riskWindowEndDate !== brief.firstGapDate ? ` — ${briefDate(brief.riskWindowEndDate)}` : ""}`
+    : "Не обнаружен";
+  const metric = (label, value, note) => createElement(document, "div", { className: "operator-brief-metric" },
+    createTextElement(document, "span", label), createTextElement(document, "strong", value), createTextElement(document, "small", note));
+  const metrics = createElement(document, "div", { className: "operator-brief-metrics" },
+    metric(brief.openingBalanceIsBankFact ? "Входящий остаток банка" : "Стартовый остаток", formatMinorMoney(brief.openingBalanceMinor), brief.openingBalanceIsBankFact ? "На конец предыдущего банковского дня" : "Не подтвержден банком"),
+    metric("Ближайший разрыв", gapLabel, brief.firstGapDate ? `По ${scenarioLabel(brief.scenario)}; максимум ${formatMinorMoney(brief.maximumNeedMinor)} ${briefDate(brief.peakDate)}` : `По ${scenarioLabel(brief.scenario)} на горизонте расчета`),
+    metric("Покрытие и стоимость", `${brief.actions.length} действий · ${formatMinorMoney(brief.coverageCostMinor)}`, brief.actions.length ? "Примененный план" : "Действия не применены"),
+    metric("Не покрыто", formatMinorMoney(brief.uncoveredNeedMinor), brief.uncoveredNeedMinor ? "Требует решения CFO" : "По выбранному сценарию"));
+  const review = brief.quality.needsReview
+    ? createElement(document, "div", { className: "operator-brief-review" },
+      createTextElement(document, "strong", "Требует проверки"),
+      createTextElement(document, "span", `Ошибки ${brief.quality.errors} · поступления без ДЗ ${brief.quality.unmatchedPayments} · распределения на проверке ${brief.quality.pendingAllocations}`),
+      createTextElement(document, "span", "Перед отчетом CFO проверьте сверку и качество данных."))
+    : createTextElement(document, "p", "Ошибок и операций для ручной сверки нет.", { className: "operator-brief-clear" });
+  const causes = createElement(document, "details", { className: "operator-brief-detail" },
+    createTextElement(document, "summary", `Почему возникает разрыв · ${brief.causes.length} задержанных поступлений`),
+    brief.causes.length
+      ? createElement(document, "ul", {}, ...brief.causes.map((item) => createTextElement(document, "li", `${item.counterparty} · ${formatMinorMoney(item.amountMinor)} · план ${briefDate(item.plannedDate)}, сценарная дата ${briefDate(item.cashDate)}`)))
+      : createTextElement(document, "p", brief.firstGapDate ? "На дату разрыва нет задержанных поступлений из текущей ДЗ. Проверьте исходящие платежи и входящий остаток." : "Разрыва по выбранному сценарию нет."),
+    brief.gapOutflows.length ? createElement(document, "ul", {}, ...brief.gapOutflows.map((item) => createTextElement(document, "li", `Списание: ${item.category} · ${formatMinorMoney(item.amountMinor)}`))) : null);
+  const plan = createElement(document, "details", { className: "operator-brief-detail" },
+    createTextElement(document, "summary", "План покрытия"),
+    brief.actions.length
+      ? createElement(document, "ul", {}, ...brief.actions.map((item) => createTextElement(document, "li", `${item.name}: ${formatMinorMoney(item.amountMinor)}${item.effectiveDate ? ` с ${briefDate(item.effectiveDate)}` : ""}; стоимость ${formatMinorMoney(item.costMinor)}`)))
+      : createTextElement(document, "p", brief.maximumNeedMinor ? "Примененного покрытия нет. Проверьте условия источников на шаге 4." : "Покрытие не требуется по выбранному сценарию."));
+  const change = brief.change
+    ? createElement(document, "details", { className: "operator-brief-detail" },
+      createTextElement(document, "summary", "Изменение к прошлому расчету"),
+      createTextElement(document, "p", brief.change.status === "comparable"
+        ? `Run ${brief.change.previousRunId} · ${briefDate(brief.change.previousAsOfDate)} · общих дат ${brief.change.commonDates}${brief.change.identityVerified ? "" : " · юрлицо/счета прошлого файла не подтверждены"}.`
+        : `Сравнение недоступно: ${brief.change.reason}`),
+      brief.change.status === "comparable" ? createElement(document, "dl", {},
+        createTextElement(document, "dt", "Входящий остаток"), createTextElement(document, "dd", formatMinorMoney(brief.change.openingBalanceDeltaMinor)),
+        createTextElement(document, "dt", "Макс. потребность на общих датах"), createTextElement(document, "dd", formatMinorMoney(brief.change.maxNeedDeltaMinor)),
+        createTextElement(document, "dt", "Стоимость покрытия (весь горизонт)"), createTextElement(document, "dd", formatMinorMoney(brief.change.costDeltaMinor)),
+        createTextElement(document, "dt", "Не покрыто (весь горизонт)"), createTextElement(document, "dd", formatMinorMoney(brief.change.uncoveredDeltaMinor))) : null)
+    : createTextElement(document, "p", "Чтобы увидеть изменение, загрузите предыдущий файл расчета на шаге 2.", { className: "operator-brief-clear" });
+  replaceChildren(container, [status, metrics, review, createElement(document, "div", { className: "operator-brief-details" }, causes, plan, change)]);
+}
+
+function renderRunStatus() {
+  const view = runController.view();
+  const brief = buildOperatorBrief(view.committed, priorSnapshot?.run ?? null);
+  const planningStale = view.status === RUN_STATUS.CURRENT && brief?.forecastStatus === "requires-planning-update";
+  const [label, tone] = planningStale ? ["Требует обновления", "stale"] : runStatusLabels[view.status];
+  document.body.dataset.planningFreshness = planningStale ? "stale" : "current";
+  const badge = document.querySelector("#runStatusBadge");
+  const detail = document.querySelector("#runStatusDetail");
+  if (badge) {
+    badge.textContent = label;
+    badge.dataset.tone = tone;
+  }
+  if (detail) {
+    const run = view.committed;
+    detail.textContent = view.error
+      ? `${view.error}${run ? ` Предыдущий расчет ${run.runId} сохранен.` : ""}`
+      : planningStale
+        ? `Run ${view.committed.runId}: плановые ДЗ и исходящие старше ${brief.planning.maxAgeWorkingDays} рабочих дней. Загрузите свежую полную книгу.`
+      : view.staleReason
+        ? `${view.staleReason} Выполните новый расчет.`
+        : view.status === RUN_STATUS.STAGED
+          ? `${view.visibleRunIsPrevious ? "Предыдущий расчет остается на экране. " : ""}Данные проверены. Нажмите «Рассчитать прогноз».`
+          : run
+            ? `Run ${run.runId} · ${run.asOfDate} · ${run.scenario.toUpperCase()}`
+            : "Подготовьте данные и выполните расчет.";
+  }
+  const snapshotButton = document.querySelector("#downloadSnapshotButton");
+  if (snapshotButton) snapshotButton.disabled = !view.committed;
+  const exportButton = document.querySelector("#exportButton");
+  if (exportButton) exportButton.disabled = view.status !== RUN_STATUS.CURRENT || view.committed?.signOff?.cfoReport?.status !== SIGN_OFF_STATUS.CFO_READY;
+  const calculateButton = document.querySelector("#calculateRunButton");
+  if (calculateButton) calculateButton.disabled = view.status === RUN_STATUS.RUNNING;
+  renderSignOff();
+  renderQualitySummary();
+  renderComparison();
+  renderOperatorBrief();
+  setWorkflowStep(workflowStep);
+}
+
+function signedDetail(confirmation) {
+  if (!confirmation) return "Подтверждение не зафиксировано.";
+  const counts = confirmation.qualityCounts;
+  return `${confirmation.operator} · ${MOSCOW_DATE_TIME.format(new Date(confirmation.confirmedAt))} МСК · Run ${confirmation.runId} · несопоставленных платежей ${counts.unmatchedPayments}, ожидающих распределения ${counts.pendingAllocations}, ошибок ${counts.errors}, предупреждений ${counts.warnings}`;
+}
+
+function renderSignOff() {
+  const view = runController.view();
+  const committed = view.committed;
+  const signOff = committed?.signOff;
+  const reconciliationConfirmed = signOff?.reconciliation?.status === SIGN_OFF_STATUS.RECONCILIATION_CONFIRMED;
+  const cfoReady = signOff?.cfoReport?.status === SIGN_OFF_STATUS.CFO_READY;
+  const reconciliationBadge = document.querySelector("#reconciliationSignOffBadge");
+  const cfoBadge = document.querySelector("#cfoSignOffBadge");
+  if (reconciliationBadge) {
+    reconciliationBadge.textContent = reconciliationConfirmed ? "Сверка подтверждена" : "Сверка не подтверждена";
+    reconciliationBadge.className = `signoff-badge ${reconciliationConfirmed ? "confirmed" : "pending"}`;
+  }
+  if (cfoBadge) {
+    cfoBadge.textContent = cfoReady ? "Отчет CFO подготовлен" : "Отчет CFO не подготовлен";
+    cfoBadge.className = `signoff-badge ${cfoReady ? "confirmed" : "pending"}`;
+  }
+  const reconciliationDetail = document.querySelector("#reconciliationSignOffDetail");
+  const cfoDetail = document.querySelector("#cfoSignOffDetail");
+  if (reconciliationDetail) reconciliationDetail.textContent = reconciliationConfirmed
+    ? signedDetail(signOff.reconciliation.confirmation)
+    : committed ? "Проверьте показатели сверки ниже и подтвердите актуальный расчет." : "Доступно после успешного расчета.";
+  if (cfoDetail) cfoDetail.textContent = cfoReady
+    ? signedDetail(signOff.cfoReport.confirmation)
+    : reconciliationConfirmed ? "Проверьте контроль готовности отчета ниже." : "Сначала подтвердите сверку.";
+  const currentBrief = buildOperatorBrief(committed);
+  const current = view.status === RUN_STATUS.CURRENT && currentBrief?.forecastStatus !== "requires-planning-update";
+  const reconciliationButton = document.querySelector("#confirmReconciliationButton");
+  const cfoButton = document.querySelector("#confirmCfoButton");
+  const acceptance = document.querySelector("#uncoveredGapAcceptanceInput");
+  const acceptanceLabel = document.querySelector("#uncoveredGapAcceptanceLabel");
+  if (acceptance && acceptance.dataset.runId !== committed?.runId) {
+    acceptance.checked = Boolean(signOff?.cfoReport?.confirmation?.uncoveredGapAccepted);
+    acceptance.dataset.runId = committed?.runId ?? "";
+  }
+  const readiness = getCfoReadiness(committed, { uncoveredGapAccepted: Boolean(acceptance?.checked) });
+  if (acceptanceLabel) acceptanceLabel.hidden = !readiness.requiresUncoveredAcceptance;
+  if (acceptance) acceptance.disabled = !current || !reconciliationConfirmed || cfoReady;
+
+  const counters = document.querySelector("#reconciliationCounters");
+  if (counters) replaceChildren(counters, [
+    createTextElement(document, "span", `Поступления банка без ДЗ: ${readiness.qualityCounts.unmatchedPayments}`),
+    createTextElement(document, "span", `Нужно распределить вручную: ${readiness.qualityCounts.pendingAllocations}`),
+    createTextElement(document, "span", `Ошибки в данных: ${readiness.qualityCounts.errors}`),
+    createTextElement(document, "span", `Предупреждения: ${readiness.qualityCounts.warnings}`)
+  ]);
+
+  const readinessSummary = document.querySelector("#cfoReadinessSummary");
+  if (readinessSummary) {
+    const metrics = createElement(document, "dl", { className: "readiness-metrics" },
+      createTextElement(document, "dt", "Максимальная потребность"), createTextElement(document, "dd", formatMinorMoney(readiness.maximumFinancingNeedMinor)),
+      createTextElement(document, "dt", "Примененное покрытие"), createTextElement(document, "dd", formatMinorMoney(readiness.appliedCoverageMinor)),
+      createTextElement(document, "dt", "Стоимость покрытия"), createTextElement(document, "dd", formatMinorMoney(readiness.totalCostMinor)),
+      createTextElement(document, "dt", "Непокрытый остаток"), createTextElement(document, "dd", formatMinorMoney(readiness.uncoveredNeedMinor))
+    );
+    const sourceState = createTextElement(document, "p", `Условия не заполнены: ${readiness.incompleteSources.join(", ") || "нет"}. Недоступные источники: ${readiness.unavailableSources.join(", ") || "нет"}.`);
+    const blockers = readiness.blockers.length
+      ? createElement(document, "ul", { className: "readiness-blockers" }, ...readiness.blockers.map((item) => createTextElement(document, "li", item.message)))
+      : createTextElement(document, "p", "Контроль пройден: отчет можно подтвердить.", { className: "readiness-ok" });
+    replaceChildren(readinessSummary, [metrics, sourceState, blockers]);
+  }
+  if (reconciliationButton) reconciliationButton.disabled = !current || reconciliationConfirmed;
+  if (cfoButton) cfoButton.disabled = !current || cfoReady || !readiness.canConfirm;
+}
+
+function deltaMoney(item) {
+  const prefix = item.deltaMinor > 0 ? "+" : "";
+  return `${prefix}${formatMinorMoney(item.deltaMinor)} (${formatMinorMoney(item.previousMinor)} → ${formatMinorMoney(item.currentMinor)})`;
+}
+
+function renderComparison() {
+  const container = document.querySelector("#comparisonContent");
+  if (!container) return;
+  renderPriorFundingTransfer();
+  renderPriorLedgerChoice();
+  const current = runController.view().committed;
+  if (!priorSnapshot || !current) {
+    replaceChildren(container, [createTextElement(document, "p", priorSnapshot
+      ? "Сначала выполните актуальный расчет. Файл предыдущего расчета сохранен для сравнения."
+      : "Предыдущий расчет не загружен. Здесь появится сравнение с текущим расчетом.", { className: "empty-state" })]);
+    return;
+  }
+  const result = compareAuditRuns(current, priorSnapshot.run);
+  if (!result.compatibility.comparable) {
+    replaceChildren(container, [createTextElement(document, "p", `Расчеты не сопоставимы: ${result.compatibility.reasons.join(" ")} Текущий run ${current.runId}; предыдущий run ${priorSnapshot.run.runId}.`, { className: "empty-state" })]);
+    return;
+  }
+  const metrics = [
+    ["Входящий остаток", result.metrics.openingBalanceMinor],
+    ["Открытая ДЗ", result.metrics.openReceivablesMinor],
+    ["Минимальный остаток", result.metrics.minimumClosingBalanceMinor],
+    ["Макс. потребность", result.metrics.maximumFinancingNeedMinor],
+    ["Стоимость покрытия", result.metrics.coverageCostMinor],
+    ["Непокрытый остаток", result.metrics.uncoveredNeedMinor]
+  ];
+  const header = createElement(document, "div", { className: "comparison-runs" },
+    createElement(document, "section", { className: "comparison-run-card comparison-run-card-previous" },
+      createTextElement(document, "strong", "Предыдущий расчет"),
+      createTextElement(document, "span", `Run ${result.previous.runId}`),
+      createTextElement(document, "small", `${MOSCOW_DATE_TIME.format(new Date(result.previous.createdAt))} МСК · дата данных ${result.previous.asOfDate}`)
+    ),
+    createElement(document, "section", { className: "comparison-run-card comparison-run-card-current" },
+      createTextElement(document, "strong", "Текущий расчет"),
+      createTextElement(document, "span", `Run ${result.current.runId}`),
+      createTextElement(document, "small", `${MOSCOW_DATE_TIME.format(new Date(result.current.createdAt))} МСК · дата данных ${result.current.asOfDate}`)
+    )
+  );
+  const metricGrid = createElement(document, "dl", { className: "comparison-metrics" }, ...metrics.flatMap(([label, value]) => [
+    createTextElement(document, "dt", label), createTextElement(document, "dd", deltaMoney(value))
+  ]));
+  const scope = createTextElement(document, "p", `Общих дат: ${result.commonDates.length}${result.commonDates.length ? ` (${result.commonDates[0]} — ${result.commonDates.at(-1)})` : ""}. Юрлицо: ${result.compatibility.legalEntities.current ?? "не указано"}; счета: ${result.compatibility.accounts.current.length || "не указаны"}; валюта ${result.compatibility.currency}; сценарий ${result.compatibility.scenario}. ${result.compatibility.identityVerified ? "Источники сопоставимы." : "В старом файле не подтверждены юрлицо или счета; сравнение ориентировочное."}`, { className: "comparison-summary" });
+  const freshness = createTextElement(document, "p", `Свежесть банка: текущий ${result.compatibility.freshness.current.map((item) => item.closeDate ?? "не указана").join(", ") || "не указана"}; предыдущий ${result.compatibility.freshness.previous.map((item) => item.closeDate ?? "не указана").join(", ") || "не указана"}. Стоимость и непокрытый разрыв относятся ко всему горизонту каждого расчета.`, { className: "comparison-summary" });
+  const daily = result.dailyBalances.length
+    ? createElement(document, "details", {}, createTextElement(document, "summary", "Остаток и потребность по общим датам"),
+      createElement(document, "ul", { className: "comparison-list" }, ...result.dailyBalances.map((item) => createTextElement(document, "li", `${item.date}: остаток ${formatMinorMoney(item.previousMinor)} → ${formatMinorMoney(item.currentMinor)}; потребность ${formatMinorMoney(item.previousNeedMinor)} → ${formatMinorMoney(item.currentNeedMinor)}.`))))
+    : createTextElement(document, "p", "Общих дат горизонта нет: ежедневный остаток не сравнивается.", { className: "empty-state" });
+  const receiptSummary = createTextElement(document, "p",
+    `ДЗ: новых ${result.receivables.new.length}, исчезнувших ${result.receivables.disappeared.length}, измененных ${result.receivables.changed.length}. Контрольных сумм источников изменено: ${result.sourceFingerprintChanges.length}.`,
+    { className: "comparison-summary" });
+  const receiptSets = createElement(document, "div", { className: "comparison-sets" },
+    createTextElement(document, "span", `Новые: ${result.receivables.new.join(", ") || "нет"}`),
+    createTextElement(document, "span", `Исчезнувшие: ${result.receivables.disappeared.join(", ") || "нет"}`),
+    createTextElement(document, "span", `Измененные: ${result.receivables.changed.map((item) => item.id).join(", ") || "нет"}`),
+    createTextElement(document, "span", `Контрольные суммы источников: ${result.sourceFingerprintChanges.map((item) => item.source).join(", ") || "без изменений"}`),
+    createTextElement(document, "span", `Коммерческие условия финансирования: изменено источников ${result.fundingInputs.changed.length}, без изменений ${result.fundingInputs.unchangedCount}`)
+  );
+  const compared = result.receivables.compared.length
+    ? createElement(document, "ul", { className: "comparison-list" }, ...result.receivables.compared.map((item) => createTextElement(document, "li",
+      `${item.id}${item.changed ? " · изменена" : " · без изменений"}: сумма Δ ${formatMinorMoney(item.openAmountDeltaMinor)}; P50 ${item.dateDelta.p50Date.previousDate} → ${item.dateDelta.p50Date.currentDate} (${item.dateDelta.p50Date.deltaDays ?? "—"} дн.); P80 ${item.dateDelta.p80Date.previousDate} → ${item.dateDelta.p80Date.currentDate}; P90 ${item.dateDelta.p90Date.previousDate} → ${item.dateDelta.p90Date.currentDate}; Stress ${item.dateDelta.stressDate.previousDate} → ${item.dateDelta.stressDate.currentDate}.`)))
+    : createTextElement(document, "p", "Общих ДЗ для сравнения нет.", { className: "muted" });
+  const fingerprints = result.sourceFingerprintChanges.length
+    ? createElement(document, "ul", { className: "comparison-list" }, ...result.sourceFingerprintChanges.map((item) => createTextElement(document, "li", `${item.source}: ${item.previousSha256 ?? "нет"} → ${item.currentSha256 ?? "нет"}`)))
+    : null;
+  replaceChildren(container, [header, scope, freshness, metricGrid, daily, receiptSummary, receiptSets, compared, fingerprints]);
+}
+
+function renderPriorFundingTransfer() {
+  const panel = document.querySelector("#priorFundingPanel");
+  const summary = document.querySelector("#priorFundingSummary");
+  const button = document.querySelector("#applyPriorFundingButton");
+  const run = priorSnapshot?.run;
+  const sources = run?.inputs?.fundingSources ?? [];
+  if (!panel) return;
+  panel.hidden = !run;
+  if (!run) return;
+  if (summary) summary.textContent = `Источник: файл предыдущего расчета · Run ${run.runId} · расчет ${MOSCOW_DATE_TIME.format(new Date(run.createdAt))} МСК · дата данных ${run.asOfDate} · источников ${sources.length}.`;
+  if (button) button.disabled = sources.length === 0;
+}
+
+function renderPriorLedgerChoice() {
+  const button = document.querySelector("#applyPriorLedgerButton");
+  const status = document.querySelector("#priorLedgerStatus");
+  const run = priorSnapshot?.run;
+  const ledger = run?.inputs?.canonicalLedger;
+  const eligible = Boolean(ledger?.receivables?.length && ledger?.bankBalances?.length
+    && Array.isArray(ledger.payments) && Array.isArray(ledger.allocations) && Array.isArray(ledger.outflows));
+  if (button) button.disabled = !eligible;
+  if (status) status.textContent = selectedPriorLedger
+    ? `База выбрана: run ${selectedPriorLedger.run.runId}, дата данных ${selectedPriorLedger.run.asOfDate}. Загрузите новый Bank + BankBalances; текущий расчет не заменен.`
+    : eligible ? `Доступна база run ${run.runId}, дата данных ${run.asOfDate}; перенос только после нажатия кнопки.`
+      : run ? "В этом файле нет исходных банковских событий и остатков для ежедневного обновления. Сравнение доступно."
+        : "Доступно для файла с сохраненными ДЗ, операциями и остатками. Затем загрузите Bank + BankBalances.";
+}
+
+function markRunStale(reason) {
+  const acceptance = document.querySelector("#uncoveredGapAcceptanceInput");
+  if (acceptance) acceptance.checked = false;
+  runController.markStale(reason);
+  renderRunStatus();
+}
+
+async function executeCurrentRun() {
+  const candidate = currentCandidate();
+  const inputs = buildRunInputs(candidate);
+  runController.stage(candidate, { reason: "manual-run" });
+  runController.begin();
+  renderRunStatus();
+  await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  try {
+    const calculation = calculateRun(inputs);
+    const run = runController.commit({
+      asOfDate: inputs.asOfDate,
+      scenario: inputs.scenario,
+      horizonDays: inputs.horizonDays,
+      currency: inputs.currency,
+      versions: MODEL_VERSIONS,
+      sources: candidate.dataSources,
+      qualityReport: candidate.qualityReport,
+      inputs,
+      outputs: calculation.outputs
+    });
+    applyCommittedInputs(inputs, run.sources, run.qualityReport);
+    selectedPriorLedger = null;
+    render();
+    renderImportReport();
+    renderRunStatus();
+    return run;
+  } catch (error) {
+    runController.fail(error);
+    renderRunStatus();
+    throw error;
+  }
 }
 
 function setScenario(scenario) {
@@ -115,8 +884,9 @@ function setScenario(scenario) {
   state.scenario = nextScenario;
   state.stress = nextScenario === "stress";
 
-  document.querySelectorAll(".segmented button").forEach((button) => {
+  document.querySelectorAll("[data-scenario]").forEach((button) => {
     button.classList.toggle("active", button.dataset.scenario === nextScenario);
+    button.setAttribute("aria-pressed", String(button.dataset.scenario === nextScenario));
   });
 
   const stressButton = document.querySelector("#stressModeButton");
@@ -162,639 +932,39 @@ function renderImportReport() {
   const more = errors.length + warnings.length - items.length;
 
   container.className = `import-report visible ${tone}`;
-  container.innerHTML = `
-    <strong>${summary}</strong>
-    ${items.length ? `<ul>${items.map((item) => `<li>${item}</li>`).join("")}${more > 0 ? `<li>Еще ${more} замечаний. Исправьте первые ошибки и повторите загрузку.</li>` : ""}</ul>` : "<span>Ошибок структуры не найдено.</span>"}
-  `;
-}
-
-function normalizeNumber(value, fieldName, rowLabel, issues, options = {}) {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  const raw = String(value ?? "").trim();
-  if (!raw) {
-    issues.errors.push(`${rowLabel}: пустое значение ${fieldName}.`);
-    return 0;
+  container.replaceChildren();
+  const heading = document.createElement("strong");
+  heading.textContent = summary;
+  container.append(heading);
+  if (!items.length) {
+    const success = document.createElement("span");
+    success.textContent = "Ошибок структуры не найдено.";
+    container.append(success);
+    return;
   }
-
-  const cleaned = raw
-    .replace(/\s/g, "")
-    .replace(/руб\.?|₽/gi, "")
-    .replace("%", "")
-    .replace(",", ".");
-  const parsed = Number(cleaned);
-
-  if (!Number.isFinite(parsed)) {
-    issues.errors.push(`${rowLabel}: не удалось прочитать ${fieldName}="${raw}" как число.`);
-    return 0;
-  }
-
-  if (options.nonNegative && parsed < 0) {
-    issues.errors.push(`${rowLabel}: ${fieldName} не может быть отрицательным.`);
-  }
-
-  return parsed;
-}
-
-function normalizeOptionalNumber(value, fieldName, rowLabel, issues, options = {}) {
-  const raw = String(value ?? "").trim();
-  if (!raw) return null;
-  return normalizeNumber(value, fieldName, rowLabel, issues, options);
-}
-
-function normalizeRate(value, fieldName, rowLabel, issues) {
-  const rawText = String(value ?? "").trim();
-  let parsed = normalizeNumber(value, fieldName, rowLabel, issues, { nonNegative: true });
-
-  if (rawText.includes("%") || parsed > 1) {
-    if (parsed <= 100) {
-      parsed = parsed / 100;
-      issues.warnings.push(`${rowLabel}: ${fieldName} прочитан как процент и преобразован в долю.`);
-    } else {
-      issues.errors.push(`${rowLabel}: ${fieldName} должен быть от 0 до 1 или от 0% до 100%.`);
-    }
-  }
-
-  if (parsed > 1) {
-    issues.errors.push(`${rowLabel}: ${fieldName} должен быть не больше 1.`);
-  }
-
-  return clamp(parsed, 0, 1);
-}
-
-function normalizeOptionalRate(value, fieldName, rowLabel, issues) {
-  const raw = String(value ?? "").trim();
-  if (!raw) return 0;
-  return normalizeRate(value, fieldName, rowLabel, issues);
-}
-
-function normalizeDate(value) {
-  if (value instanceof Date) return value;
-  if (typeof value === "number") {
-    const excelEpoch = Date.UTC(1899, 11, 30);
-    return new Date(excelEpoch + value * msDay);
-  }
-  const text = String(value ?? "").trim();
-  if (!text) return null;
-  const isoMatch = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (isoMatch) return new Date(`${isoMatch[1]}-${isoMatch[2]}-${isoMatch[3]}T00:00:00`);
-  const ruMatch = text.match(/^(\d{1,2})[.\/](\d{1,2})[.\/](\d{4})$/);
-  if (ruMatch) {
-    const [, day, month, year] = ruMatch;
-    return new Date(`${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}T00:00:00`);
-  }
-  const parsed = new Date(text);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
-}
-
-function normalizeBoolean(value) {
-  if (typeof value === "boolean") return value;
-  const text = String(value ?? "").trim().toLowerCase();
-  if (["true", "1", "yes", "y", "да", "истина"].includes(text)) return true;
-  if (["false", "0", "no", "n", "нет", "ложь"].includes(text)) return false;
-  return false;
-}
-
-function normalizeDelayHistory(value, rowLabel, issues) {
-  if (value === undefined || value === null || String(value).trim() === "") return [];
-  const parts = String(value).split(/[;,]/).map((part) => part.trim()).filter(Boolean);
-  const delays = parts.map((part) => Number(part.replace(",", "."))).filter((item) => Number.isFinite(item) && item >= 0);
-  if (parts.length && delays.length !== parts.length) {
-    issues.warnings.push(`${rowLabel}: часть значений в истории задержек не распознана.`);
-  }
-  return delays;
-}
-
-function normalizeHeader(value) {
-  return String(value ?? "").trim();
-}
-
-const headerAliases = {
-  invoice_id: ["invoice_id", "номер счета", "номер счёта", "счет", "счёт", "номер документа", "документ", "invoice", "invoice id"],
-  counterparty: ["counterparty", "контрагент", "дебитор", "клиент", "покупатель"],
-  amount: ["amount", "сумма", "сумма платежа", "сумма поступления", "плановая сумма", "сумма постоплаты"],
-  planned_date: ["planned_date", "плановая дата оплаты", "дата оплаты", "плановая дата", "дата поступления", "плановая дата поступления"],
-  actual_payment_date: ["actual_payment_date", "фактическая дата оплаты", "фактическая дата оплаты ", "факт оплаты", "дата факта", "фактическая дата поступления"],
-  due_days: ["due_days", "отсрочка, дней", "отсрочка дней", "отсрочка", "срок отсрочки", "срок постоплаты"],
-  avg_delay: ["avg_delay", "средняя задержка, дней", "средняя задержка дней", "средняя задержка", "средняя просрочка"],
-  late_5: ["late_5", "просрочка 5+", "просрочка 5+ дней", "5+ дней", "доля просрочки 5+"],
-  late_10: ["late_10", "просрочка 10+", "просрочка 10+ дней", "10+ дней", "доля просрочки 10+"],
-  late_30: ["late_30", "просрочка 30+", "просрочка 30+ дней", "30+ дней", "доля просрочки 30+"],
-  open_ar: ["open_ar", "открытая дз", "дз", "дебиторская задолженность", "остаток дз"],
-  documents_ok: ["documents_ok", "документы в порядке", "документы ок", "закрывающие документы", "есть документы"],
-  bank_match: ["bank_match", "поступления сматчены с банком", "матчинг банка", "банк сматчен", "сверено с банком"],
-  history_total: ["history_total", "количество прошлых договоров", "история всего", "ретроспектива всего"],
-  history_on_time: ["history_on_time", "оплат в срок", "история оплат в срок", "ретроспектива в срок"],
-  history_avg_delay: ["history_avg_delay", "средняя задержка по истории", "историческая средняя задержка", "средняя задержка истории"],
-  history_worst_delay: ["history_worst_delay", "максимальная задержка по истории", "худшая задержка", "историческая максимальная задержка"],
-  history_delays: ["history_delays", "история задержек, дней", "история задержек", "исторические задержки", "задержки оплат"],
-  date: ["date", "дата платежа", "дата", "плановая дата платежа"],
-  category: ["category", "категория платежа", "категория", "назначение", "тип платежа"],
-  criticality: ["criticality", "критичность", "важность", "тип критичности"],
-  opening_balance: ["opening_balance", "входящий остаток", "входящий остаток денежных средств", "остаток денежных средств", "стартовый остаток", "остаток"]
-};
-
-function canonicalHeader(value) {
-  const normalized = normalizeHeader(value).toLowerCase().replace(/\s+/g, " ");
-  const found = Object.entries(headerAliases).find(([, aliases]) => aliases.includes(normalized));
-  return found ? found[0] : normalizeHeader(value);
-}
-
-function validateHeaders(headers, required, sheetName) {
-  const present = new Set(headers.map(canonicalHeader));
-  const missing = required.filter((key) => !present.has(key));
-  if (missing.length) {
-    throw new Error(`На листе ${sheetName} не хватает колонок: ${missing.join(", ")}. Можно использовать русские названия из шаблона.`);
-  }
-}
-
-function parseReceipts(rows) {
-  const issues = { errors: [], warnings: [] };
-  const headers = rows[0].map(canonicalHeader);
-  validateHeaders(headers, ["invoice_id", "counterparty", "amount", "planned_date", "due_days"], "Receipts");
-  const receipts = rows.slice(1).filter((row) => row.some((cell) => String(cell ?? "").trim() !== "")).map((row, idx) => {
-    const item = Object.fromEntries(headers.map((key, idx) => [key, row[idx]]));
-    const rowLabel = `Receipts строка ${idx + 2}${item.invoice_id ? ` (${item.invoice_id})` : ""}`;
-    const plannedDate = normalizeDate(item.planned_date);
-    if (!plannedDate) {
-      issues.errors.push(`${rowLabel}: некорректная planned_date.`);
-    }
-    if (!item.invoice_id) {
-      issues.errors.push(`${rowLabel}: пустой invoice_id.`);
-    }
-    if (!item.counterparty) {
-      issues.errors.push(`${rowLabel}: пустой counterparty.`);
-    }
-    return {
-      id: item.invoice_id,
-      counterparty: item.counterparty,
-      amount: normalizeNumber(item.amount, "amount", rowLabel, issues, { nonNegative: true }),
-      plannedDate: plannedDate ?? forecastStartDate,
-      dueDays: normalizeNumber(item.due_days, "due_days", rowLabel, issues, { nonNegative: true }),
-      avgDelay: item.avg_delay === undefined ? null : normalizeOptionalNumber(item.avg_delay, "avg_delay", rowLabel, issues, { nonNegative: true }),
-      late5: item.late_5 === undefined ? 0 : normalizeOptionalRate(item.late_5, "late_5", rowLabel, issues),
-      late10: item.late_10 === undefined ? 0 : normalizeOptionalRate(item.late_10, "late_10", rowLabel, issues),
-      late30: item.late_30 === undefined ? 0 : normalizeOptionalRate(item.late_30, "late_30", rowLabel, issues),
-      openAr: item.open_ar === undefined ? 0 : normalizeOptionalNumber(item.open_ar, "open_ar", rowLabel, issues, { nonNegative: true }) ?? 0,
-      documentsOk: item.documents_ok === undefined ? true : normalizeBoolean(item.documents_ok),
-      bankMatch: item.bank_match === undefined ? true : normalizeBoolean(item.bank_match),
-      historyTotal: item.history_total === undefined ? null : normalizeOptionalNumber(item.history_total, "history_total", rowLabel, issues, { nonNegative: true }),
-      historyOnTime: item.history_on_time === undefined ? null : normalizeOptionalNumber(item.history_on_time, "history_on_time", rowLabel, issues, { nonNegative: true }),
-      historyAvgDelay: item.history_avg_delay === undefined ? null : normalizeOptionalNumber(item.history_avg_delay, "history_avg_delay", rowLabel, issues, { nonNegative: true }),
-      historyWorstDelay: item.history_worst_delay === undefined ? null : normalizeOptionalNumber(item.history_worst_delay, "history_worst_delay", rowLabel, issues, { nonNegative: true }),
-      historyDelays: normalizeDelayHistory(item.history_delays, rowLabel, issues)
-    };
+  const list = document.createElement("ul");
+  items.forEach((item) => {
+    const row = document.createElement("li");
+    row.textContent = item;
+    list.append(row);
   });
-  receipts.importIssues = issues;
-  return receipts;
-}
-
-function parseModelContracts(rows) {
-  const issues = { errors: [], warnings: [] };
-  const headers = rows[0].map(canonicalHeader);
-  validateHeaders(headers, ["invoice_id", "counterparty", "amount", "planned_date", "due_days"], "Лист1");
-  const contracts = rows.slice(1).filter((row) => row.some((cell) => String(cell ?? "").trim() !== "")).map((row, idx) => {
-    const item = Object.fromEntries(headers.map((key, idx) => [key, row[idx]]));
-    const rowLabel = `Лист1 строка ${idx + 2}${item.invoice_id ? ` (${item.invoice_id})` : ""}`;
-    const plannedDate = normalizeDate(item.planned_date);
-    const factDate = normalizeDate(item.actual_payment_date);
-    if (!plannedDate) issues.errors.push(`${rowLabel}: некорректная плановая дата оплаты.`);
-    if (!item.counterparty) issues.errors.push(`${rowLabel}: пустой контрагент.`);
-    const delay = factDate && plannedDate
-      ? Math.max(0, daysBetween(factDate, plannedDate))
-      : normalizeOptionalNumber(item.avg_delay, "Средняя задержка", rowLabel, issues, { nonNegative: true });
-    if (delay === null) {
-      issues.errors.push(`${rowLabel}: укажите фактическую дату оплаты или среднюю задержку.`);
-    }
-    return {
-      id: item.invoice_id,
-      counterparty: item.counterparty,
-      amount: normalizeNumber(item.amount, "amount", rowLabel, issues, { nonNegative: true }),
-      plannedDate: plannedDate ?? forecastStartDate,
-      dueDays: normalizeNumber(item.due_days, "due_days", rowLabel, issues, { nonNegative: true }),
-      delay: delay ?? 0
-    };
-  });
-  if (issues.errors.length) {
-    const receipts = [];
-    receipts.importIssues = issues;
-    return receipts;
+  if (more > 0) {
+    const row = document.createElement("li");
+    row.textContent = `Еще ${more} замечаний. Исправьте первые ошибки и повторите загрузку.`;
+    list.append(row);
   }
-  const last = contracts[contracts.length - 1];
-  const delays = contracts.map((item) => item.delay);
-  const nextNumber = contracts.length + 1;
-  const nextPlannedDate = last ? addDays(last.plannedDate, last.dueDays || 30) : forecastStartDate;
-  const avgDelay = delays.length ? delays.reduce((sum, delay) => sum + delay, 0) / delays.length : 0;
-  const receipt = {
-    id: `Договор №${nextNumber}`,
-    counterparty: last?.counterparty ?? "Контрагент",
-    amount: last?.amount ?? 0,
-    plannedDate: nextPlannedDate,
-    dueDays: last?.dueDays ?? 30,
-    avgDelay,
-    late5: delays.length ? delays.filter((delay) => delay >= 5).length / delays.length : 0,
-    late10: delays.length ? delays.filter((delay) => delay >= 10).length / delays.length : 0,
-    late30: delays.length ? delays.filter((delay) => delay >= 30).length / delays.length : 0,
-    openAr: last?.amount ?? 0,
-    documentsOk: true,
-    bankMatch: true,
-    historyTotal: delays.length,
-    historyOnTime: delays.filter((delay) => delay === 0).length,
-    historyAvgDelay: avgDelay,
-    historyWorstDelay: delays.length ? Math.max(...delays) : 0,
-    historyDelays: delays
-  };
-  const receipts = [receipt];
-  receipts.importIssues = {
-    errors: [],
-    warnings: [`Лист1 распознан как модельный пример. Создан прогноз для ${receipt.id} по истории ${contracts.length} договоров.`]
-  };
-  return receipts;
-}
-
-function parseOutflows(rows) {
-  const issues = { errors: [], warnings: [] };
-  const headers = rows[0].map(canonicalHeader);
-  validateHeaders(headers, ["date", "category", "amount", "criticality"], "Outflows");
-  const outflows = rows.slice(1).filter((row) => row.some((cell) => String(cell ?? "").trim() !== "")).map((row, idx) => {
-    const item = Object.fromEntries(headers.map((key, idx) => [key, row[idx]]));
-    const rowLabel = `Outflows строка ${idx + 2}${item.category ? ` (${item.category})` : ""}`;
-    const date = normalizeDate(item.date);
-    if (!date) {
-      issues.errors.push(`${rowLabel}: некорректная date.`);
-    }
-    if (!item.category) {
-      issues.errors.push(`${rowLabel}: пустой category.`);
-    }
-    if (!["must-pay", "moveable"].includes(String(item.criticality ?? "").trim())) {
-      issues.warnings.push(`${rowLabel}: criticality лучше указать как must-pay или moveable.`);
-    }
-    return {
-      date: date ?? forecastStartDate,
-      category: item.category,
-      amount: normalizeNumber(item.amount, "amount", rowLabel, issues, { nonNegative: true }),
-      criticality: String(item.criticality ?? "").trim() || "must-pay"
-    };
-  });
-  outflows.importIssues = issues;
-  return outflows;
-}
-
-function parseBalances(rows) {
-  const issues = { errors: [], warnings: [] };
-  const headers = rows[0].map(canonicalHeader);
-  validateHeaders(headers, ["date", "opening_balance"], "Остатки");
-  const sourceRows = rows.slice(1).filter((row) => row.some((cell) => String(cell ?? "").trim() !== ""));
-  if (!sourceRows.length) {
-    issues.warnings.push("Лист Остатки пустой. Используется значение из интерфейса.");
-    return { value: null, issues };
-  }
-
-  const item = Object.fromEntries(headers.map((key, idx) => [key, sourceRows[0][idx]]));
-  const date = normalizeDate(item.date);
-  const rowLabel = "Остатки строка 2";
-  if (!date) {
-    issues.errors.push(`${rowLabel}: некорректная дата.`);
-  }
-
-  return {
-    value: {
-      date: date ?? forecastStartDate,
-      openingBalance: normalizeNumber(item.opening_balance, "Входящий остаток", rowLabel, issues, { nonNegative: true })
-    },
-    issues
-  };
-}
-
-async function inflateRaw(bytes) {
-  if (!("DecompressionStream" in window)) {
-    throw new Error("Браузер не поддерживает распаковку Excel ZIP. Откройте MVP в Chrome или Edge.");
-  }
-  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
-  return new Uint8Array(await new Response(stream).arrayBuffer());
-}
-
-function decodeText(bytes) {
-  return new TextDecoder("utf-8").decode(bytes);
-}
-
-async function unzipXlsx(buffer) {
-  const bytes = new Uint8Array(buffer);
-  const entries = new Map();
-  const u16 = (offset) => bytes[offset] | (bytes[offset + 1] << 8);
-  const u32 = (offset) => (
-    bytes[offset] |
-    (bytes[offset + 1] << 8) |
-    (bytes[offset + 2] << 16) |
-    (bytes[offset + 3] << 24)
-  ) >>> 0;
-  const eocdSignature = 0x06054b50;
-  const centralSignature = 0x02014b50;
-  const localSignature = 0x04034b50;
-  let eocdOffset = -1;
-
-  for (let idx = bytes.length - 22; idx >= Math.max(0, bytes.length - 66000); idx -= 1) {
-    if (u32(idx) === eocdSignature) {
-      eocdOffset = idx;
-      break;
-    }
-  }
-
-  if (eocdOffset < 0) {
-    throw new Error("Не удалось прочитать структуру .xlsx: файл не похож на Excel Workbook.");
-  }
-
-  const centralEntries = u16(eocdOffset + 10);
-  const centralOffset = u32(eocdOffset + 16);
-  let offset = centralOffset;
-
-  for (let entryIdx = 0; entryIdx < centralEntries; entryIdx += 1) {
-    if (u32(offset) !== centralSignature) {
-      throw new Error("Не удалось прочитать центральный каталог Excel-файла.");
-    }
-
-    const method = u16(offset + 10);
-    const compressedSize = u32(offset + 20);
-    const fileNameLength = u16(offset + 28);
-    const extraLength = u16(offset + 30);
-    const commentLength = u16(offset + 32);
-    const localHeaderOffset = u32(offset + 42);
-    const nameStart = offset + 46;
-    const name = decodeText(bytes.slice(nameStart, nameStart + fileNameLength)).replace(/\\/g, "/");
-
-    if ([compressedSize, localHeaderOffset].includes(0xffffffff)) {
-      throw new Error("ZIP64 Excel-файлы пока не поддерживаются. Сохраните файл как обычный .xlsx без ZIP64.");
-    }
-
-    if (u32(localHeaderOffset) !== localSignature) {
-      throw new Error(`Не удалось прочитать локальный ZIP-заголовок для ${name}.`);
-    }
-
-    const localNameLength = u16(localHeaderOffset + 26);
-    const localExtraLength = u16(localHeaderOffset + 28);
-    const dataStart = localHeaderOffset + 30 + localNameLength + localExtraLength;
-    const compressed = bytes.slice(dataStart, dataStart + compressedSize);
-    let data;
-
-    if (method === 0) {
-      data = compressed;
-    } else if (method === 8) {
-      data = await inflateRaw(compressed);
-    } else {
-      throw new Error(`Неподдерживаемый метод сжатия ZIP: ${method}`);
-    }
-
-    entries.set(name, data);
-    offset = nameStart + fileNameLength + extraLength + commentLength;
-  }
-
-  return entries;
-}
-
-function parseXml(text) {
-  const xml = new DOMParser().parseFromString(text, "application/xml");
-  const error = xml.querySelector("parsererror");
-  if (error) throw new Error("Не удалось прочитать XML внутри Excel-файла.");
-  return xml;
-}
-
-function getXmlEntry(entries, path) {
-  const data = entries.get(path);
-  if (!data) throw new Error(`В Excel-файле не найден ${path}`);
-  return parseXml(decodeText(data));
-}
-
-function relationshipMap(entries, relsPath) {
-  const xml = getXmlEntry(entries, relsPath);
-  return Object.fromEntries([...xml.getElementsByTagName("Relationship")].map((rel) => [
-    rel.getAttribute("Id"),
-    rel.getAttribute("Target")
-  ]));
-}
-
-function normalizeTarget(baseDir, target) {
-  if (target.startsWith("/")) return target.slice(1);
-  const stack = baseDir.split("/").filter(Boolean);
-  target.split("/").forEach((part) => {
-    if (part === "..") stack.pop();
-    else if (part !== ".") stack.push(part);
-  });
-  return stack.join("/");
-}
-
-function readSharedStrings(entries) {
-  if (!entries.has("xl/sharedStrings.xml")) return [];
-  const xml = getXmlEntry(entries, "xl/sharedStrings.xml");
-  return [...xml.getElementsByTagName("si")].map((si) => [...si.getElementsByTagName("t")].map((t) => t.textContent).join(""));
-}
-
-function columnIndex(cellRef) {
-  const letters = String(cellRef ?? "").match(/[A-Z]+/i)?.[0]?.toUpperCase() ?? "A";
-  return [...letters].reduce((sum, char) => sum * 26 + char.charCodeAt(0) - 64, 0) - 1;
-}
-
-function cellValue(cell, sharedStrings) {
-  const type = cell.getAttribute("t");
-  if (type === "inlineStr") {
-    return [...cell.getElementsByTagName("t")].map((node) => node.textContent).join("");
-  }
-
-  const value = cell.getElementsByTagName("v")[0]?.textContent ?? "";
-  if (type === "s") return sharedStrings[Number(value)] ?? "";
-  if (type === "b") return value === "1";
-  if (value === "") return "";
-
-  const number = Number(value);
-  return Number.isNaN(number) ? value : number;
-}
-
-function readSheetRows(xml, sharedStrings) {
-  const rows = [...xml.getElementsByTagName("row")];
-  return rows.map((row) => {
-    const result = [];
-    [...row.getElementsByTagName("c")].forEach((cell) => {
-      result[columnIndex(cell.getAttribute("r"))] = cellValue(cell, sharedStrings);
-    });
-    return result.map((value) => value ?? "");
-  });
-}
-
-async function readExcelFile(file) {
-  if (!file) throw new Error("Выберите Excel-файл .xlsx.");
-  if (!file.name.toLowerCase().endsWith(".xlsx")) {
-    throw new Error("Сейчас поддерживается формат .xlsx. Сохраните файл как Excel Workbook (*.xlsx).");
-  }
-
-  const entries = await unzipXlsx(await file.arrayBuffer());
-  const workbook = getXmlEntry(entries, "xl/workbook.xml");
-  const rels = relationshipMap(entries, "xl/_rels/workbook.xml.rels");
-  const sharedStrings = readSharedStrings(entries);
-  const sheets = {};
-
-  [...workbook.getElementsByTagName("sheet")].forEach((sheet) => {
-    const name = sheet.getAttribute("name");
-    const relId = sheet.getAttribute("r:id");
-    const target = rels[relId];
-    if (!target) return;
-    const path = normalizeTarget("xl", target);
-    sheets[name] = readSheetRows(getXmlEntry(entries, path), sharedStrings);
-  });
-
-  const receiptsRows = sheets.Receipts ?? sheets["Поступления"] ?? sheets["Входящие"] ?? sheets.Incoming;
-  const outflowsRows = sheets.Outflows ?? sheets["Исходящие"] ?? sheets["Платежи"] ?? sheets.Payments;
-  const balanceRows = sheets.Balances ?? sheets["Остатки"] ?? sheets["Остатки денежных средств"] ?? sheets.Cash;
-  const modelRows = sheets["Лист1"];
-
-  if (!receiptsRows && !modelRows) {
-    throw new Error("В Excel-файле должен быть лист Поступления или модельный лист Лист1.");
-  }
-  if (!outflowsRows && !modelRows) {
-    throw new Error("В Excel-файле должны быть листы Поступления и Исходящие. Английские варианты Receipts и Outflows тоже поддерживаются.");
-  }
-
-  const receipts = modelRows && !receiptsRows ? parseModelContracts(modelRows) : parseReceipts(receiptsRows);
-  const outflows = outflowsRows ? parseOutflows(outflowsRows) : (() => {
-    const items = [];
-    items.importIssues = { errors: [], warnings: ["Лист Исходящие не найден. Для модельного примера используются нулевые списания."] };
-    return items;
-  })();
-  const balances = balanceRows ? parseBalances(balanceRows) : { value: null, issues: { errors: [], warnings: ["Лист Остатки не найден. Используется значение из интерфейса."] } };
-  const errors = [...(receipts.importIssues?.errors ?? []), ...(outflows.importIssues?.errors ?? []), ...(balances.issues?.errors ?? [])];
-  const warnings = [...(receipts.importIssues?.warnings ?? []), ...(outflows.importIssues?.warnings ?? []), ...(balances.issues?.warnings ?? [])];
-
-  if (!receipts.length) errors.push("Лист Receipts не содержит строк данных.");
-  if (!outflows.length && !modelRows) errors.push("Лист Outflows не содержит строк данных.");
-
-  if (errors.length) {
-    state.importReport = {
-      errors,
-      warnings,
-      summary: "Файл не загружен: найдены ошибки в исходных данных."
-    };
-    renderImportReport();
-    throw new Error("В Excel-файле есть ошибки. Смотрите отчет качества загрузки ниже.");
-  }
-
-  state.importReport = {
-    errors: [],
-    warnings,
-    summary: `Файл готов к расчету: ${receipts.length} поступлений и ${outflows.length} исходящих платежей.`
-  };
-  renderImportReport();
-
-  return {
-    receipts,
-    outflows,
-    balance: balances.value
-  };
-}
-
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
-}
-
-function daysBetween(a, b) {
-  return Math.round((a.getTime() - b.getTime()) / msDay);
-}
-
-function addDays(date, days) {
-  const next = new Date(date);
-  next.setDate(next.getDate() + days);
-  return next;
-}
-
-function formatDateInput(date) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function percentileDelay(delays, percentile) {
-  if (!delays.length) return 0;
-  const sorted = delays.slice().sort((a, b) => a - b);
-  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(percentile * sorted.length) - 1));
-  return Math.round(sorted[index]);
-}
-
-function buildTimingFromFallback(receipt) {
-  if (receipt.avgDelay === null || receipt.avgDelay === undefined) {
-    return { p50: 0, p80: 0, p90: 0, stress: 0, source: "new" };
-  }
-  let p50 = Math.max(0, Math.round(receipt.avgDelay * 0.5));
-  let p80 = Math.max(p50, Math.round(receipt.avgDelay * 1.0));
-  let p90 = Math.max(p80, Math.round(receipt.avgDelay * 1.3));
-  let stress = Math.max(p90, Math.round(receipt.avgDelay * 1.6));
-  if (!receipt.documentsOk) {
-    p50 += 4;
-    p80 += 4;
-    p90 += 4;
-    stress += 4;
-  }
-  if (!receipt.bankMatch) {
-    p50 += 2;
-    p80 += 2;
-    p90 += 2;
-    stress += 2;
-  }
-  if (receipt.late30 >= 0.3) {
-    stress = Math.max(stress, 30);
-  }
-  return { p50, p80, p90, stress, source: "fallback" };
+  container.append(list);
 }
 
 function scoreReceipt(receipt) {
-  const historyDelays = receipt.historyDelays?.length
-    ? receipt.historyDelays
-    : receipt.historyTotal && receipt.historyAvgDelay !== null && receipt.historyWorstDelay !== null
-      ? [0, receipt.historyAvgDelay, receipt.historyWorstDelay]
-      : [];
-  const timing = historyDelays.length
-    ? {
-      p50: percentileDelay(historyDelays, 0.5),
-      p80: percentileDelay(historyDelays, 0.8),
-      p90: percentileDelay(historyDelays, 0.9),
-      stress: Math.max(...historyDelays),
-      source: "history"
-    }
-    : buildTimingFromFallback(receipt);
-  const onTimeCount = historyDelays.length ? historyDelays.filter((delay) => delay === 0).length : null;
-  const onTimeProbability = historyDelays.length ? onTimeCount / historyDelays.length : timing.source === "new" ? 1 : null;
-  const p50Date = addDays(receipt.plannedDate, timing.p50);
-  const p80Date = addDays(receipt.plannedDate, timing.p80);
-  const p90Date = addDays(receipt.plannedDate, timing.p90);
-  const stressDate = addDays(receipt.plannedDate, timing.stress);
-  const riskWindow = `${DATE.format(receipt.plannedDate)} — ${DATE.format(p80Date)}`;
-  const reason = timing.source === "history"
-    ? "история задержек контрагента"
-    : timing.source === "new"
-      ? "новый контрагент: истории оплат нет"
-      : "fallback: средняя задержка, документы и качество данных";
-  return {
-    ...receipt,
-    probability: onTimeProbability ?? 0,
-    expectedDelay: timing.p50,
-    expectedDate: p50Date,
-    p50Delay: timing.p50,
-    p80Delay: timing.p80,
-    p90Delay: timing.p90,
-    stressDelay: timing.stress,
-    p50Date,
-    p80Date,
-    p90Date,
-    stressDate,
-    scenarioDelays: timing,
-    riskAmount: receipt.amount,
-    riskWindowStart: receipt.plannedDate,
-    riskWindowEnd: p80Date,
-    riskWindow,
-    shiftReason: reason,
-    onTimeProbability,
-    scoreExplanation: timing.source === "history"
-      ? `P50/P80/P90 по истории задержек: ${historyDelays.join("; ")} дней.`
-      : timing.source === "new"
-        ? "Нет истории задержек и средней задержки: первый платеж дефолтно ставится в срок, надежность даты 100%, но без исторического скоринга."
-        : "P50/P80/P90 по fallback-логике: средняя задержка, документы и матчинг с банком."
-  };
+  const portfolioDelays = state.receipts
+    .filter((item) => item.counterparty !== receipt.counterparty)
+    .flatMap((item) => item.historyDelays ?? []);
+  return scoreReceiptDomain(receipt, {
+    formatDate: (date) => DATE.format(date),
+    asOfDate: forecastStartDate,
+    portfolioDelays: receipt.portfolioDelays?.length ? receipt.portfolioDelays : portfolioDelays
+  });
 }
 
 function scenarioProbability(probability, scenario) {
@@ -808,83 +978,29 @@ function scenarioProbability(probability, scenario) {
   return clamp((map[scenario] ?? probability) - stressDiscount, 0.05, 0.98);
 }
 
-function scenarioCashDate(receipt, scenario) {
-  const delay = receipt.scenarioDelays?.[scenario] ?? receipt.expectedDelay;
-  if (delay === null || delay === undefined) return null;
-  return addDays(receipt.plannedDate, delay);
-}
-
 function buildForecast(scored, scenario) {
-  const maxScenarioDate = scored.reduce((maxDate, receipt) => {
-    const dates = [receipt.plannedDate, receipt.p50Date, receipt.p80Date, receipt.p90Date, receipt.stressDate].filter(Boolean);
-    const receiptMax = dates.reduce((latest, date) => date > latest ? date : latest, maxDate);
-    return receiptMax > maxDate ? receiptMax : maxDate;
-  }, forecastStartDate);
-  const maxOutflowDate = state.outflows.reduce((maxDate, outflow) => outflow.date > maxDate ? outflow.date : maxDate, maxScenarioDate);
-  const horizonDays = Math.max(31, daysBetween(maxOutflowDate, forecastStartDate) + 1);
-  const days = Array.from({ length: horizonDays }, (_, idx) => {
-    const date = addDays(forecastStartDate, idx);
-    return {
-      date,
-      openingBalance: 0,
-      plannedIn: 0,
-      expectedIn: 0,
-      outflow: 0,
-      closingBalance: 0,
-      financingNeed: 0,
-      balance: 0,
-      p50Balance: 0,
-      p80Balance: 0
-    };
+  return buildForecastDomain({
+    scored,
+    scenario,
+    forecastStartDate,
+    outflows: state.outflows,
+    openingBalance: state.openingBalance
   });
-
-  days.forEach((day) => {
-    scored.forEach((receipt) => {
-      if (daysBetween(receipt.plannedDate, day.date) === 0) {
-        day.plannedIn += receipt.amount;
-      }
-      const cashDate = scenarioCashDate(receipt, scenario);
-      if (cashDate && daysBetween(cashDate, day.date) === 0) {
-        day.expectedIn += receipt.amount;
-      }
-    });
-    state.outflows.forEach((outflow) => {
-      if (daysBetween(outflow.date, day.date) === 0) {
-        day.outflow += outflow.amount;
-      }
-    });
-  });
-
-  let balance = state.openingBalance;
-  let p50Balance = state.openingBalance;
-  let p80Balance = state.openingBalance;
-
-  days.forEach((day) => {
-    day.openingBalance = balance;
-    balance += day.expectedIn - day.outflow;
-    p50Balance += expectedForDay(scored, day.date, "p50") - day.outflow;
-    p80Balance += expectedForDay(scored, day.date, "p80") - day.outflow;
-    day.balance = balance;
-    day.closingBalance = balance;
-    day.financingNeed = Math.max(0, -balance);
-    day.p50Balance = p50Balance;
-    day.p80Balance = p80Balance;
-  });
-
-  return days;
-}
-
-function expectedForDay(scored, date, scenario) {
-  return scored.reduce((sum, receipt) => {
-    const cashDate = scenarioCashDate(receipt, scenario);
-    if (!cashDate || daysBetween(cashDate, date) !== 0) return sum;
-    return sum + receipt.amount;
-  }, 0);
 }
 
 function formatMoney(value) {
   const sign = value < 0 ? "-" : "";
   return `${sign}${RUB.format(Math.abs(value)).replace("₽", "руб.")}`;
+}
+
+function formatMinorMoney(valueMinor) {
+  return formatMoney((valueMinor ?? 0) / 100);
+}
+
+function formatFundingDate(dateIso) {
+  if (!dateIso) return "—";
+  const date = normalizeDate(dateIso);
+  return date ? DATE.format(date) : dateIso;
 }
 
 function formatMoneyCompact(value) {
@@ -905,12 +1021,6 @@ function formatPct(value) {
 
 function formatPctExact(value) {
   return `${(value * 100).toLocaleString("ru-RU", { maximumFractionDigits: 2 })}%`;
-}
-
-function riskPill(value) {
-  if (value >= 0.75) return `<span class="pill good">низкий</span>`;
-  if (value >= 0.55) return `<span class="pill warn">средний</span>`;
-  return `<span class="pill bad">высокий</span>`;
 }
 
 function render() {
@@ -965,29 +1075,41 @@ function renderOpsPreview(scored, forecast) {
 }
 
 function renderMetrics(scored, forecast) {
-  const planned = scored.reduce((sum, item) => sum + item.amount, 0);
-  const scenarioCash = scored.reduce((sum, item) => scenarioCashDate(item, state.scenario) ? sum + item.amount : sum, 0);
+  const planned = forecast.reduce((sum, day) => sum + day.plannedIn, 0);
+  const scenarioCash = forecast.reduce((sum, day) => sum + day.expectedIn, 0);
   const minBalance = Math.min(...forecast.map((day) => day.closingBalance));
   const fundingNeed = Math.max(0, -minBalance);
-  const medianShift = scored.length ? Math.round(scored.reduce((sum, item) => sum + item.p50Delay, 0) / scored.length) : 0;
-  const shiftedAmount = scored.reduce((sum, item) => item.p50Delay > 0 ? sum + item.amount : sum, 0);
+  const delayKey = `${state.scenario}Delay`;
+  const averageShift = scored.length
+    ? Math.round(scored.reduce((sum, item) => sum + (item[delayKey] ?? 0), 0) / scored.length)
+    : 0;
+  const shiftedAmount = scored.reduce((sum, item) => (item[delayKey] ?? 0) > 0 ? sum + item.amount : sum, 0);
 
   const metrics = [
     ["Плановые поступления", formatMoney(planned), "полная сумма по договорным датам", "Σ всех плановых входящих платежей в горизонте прогноза.", "Справочная сумма плана: сама по себе не увеличивает остаток денег."],
     [`Сценарный cash-in ${scenarioLabel(state.scenario)}`, formatMoney(scenarioCash), "полная сумма на сценарных датах", "Σ полных сумм платежей, перенесенных на P50/P80/P90/Stress даты.", "Вероятность влияет на дату, а не дробит сумму."],
     ["Максимальный cash gap", formatMoney(fundingNeed), `минимальный исходящий остаток ${formatMoney(minBalance)}`, "MAX(0; -минимальный исходящий остаток по выбранному сценарию).", "Разрыв возникает между договорной датой cash-in и сценарной датой фактической оплаты."],
-    ["Медианный сдвиг cash-in", `${medianShift} дн.`, `${formatMoney(shiftedAmount)} сдвинуто после плана`, "Среднее значение P50-сдвига по платежам в текущем наборе.", "Показывает, насколько реалистичная дата обычно позже договорной."]
+    [`Средний сдвиг даты · ${scenarioLabel(state.scenario)}`, `${averageShift} дн.`, `${formatMoney(shiftedAmount)} ожидается позже плана`, `Среднее число дней между договорной и ${scenarioLabel(state.scenario)} датой.`, "Показывает, насколько позже плана ожидаются деньги в выбранном сценарии."]
   ];
 
-  document.querySelector("#metricGrid").innerHTML = metrics.map(([label, value, note, formula, explanation]) => `
-    <article class="metric-card" title="${formula} ${explanation}">
-      <span>${label}<i class="info-dot" aria-hidden="true">i</i></span>
-      <strong>${value}</strong>
-      <small>${note}</small>
-      <p class="formula-text">${formula}</p>
-      <p class="metric-explain">${explanation}</p>
-    </article>
-  `).join("");
+  const cards = metrics.map(([label, value, note, formula, explanation]) => {
+    const heading = createElement(document, "span");
+    heading.append(
+      document.createTextNode(label),
+      createTextElement(document, "i", "i", { className: "info-dot", attributes: { "aria-hidden": "true" } })
+    );
+    return createElement(document, "article", { className: "metric-card", title: `${formula} ${explanation}` },
+      heading,
+      createTextElement(document, "strong", value),
+      createTextElement(document, "small", note),
+      createElement(document, "details", { className: "metric-details" },
+        createTextElement(document, "summary", "Как рассчитано"),
+        createTextElement(document, "p", formula, { className: "formula-text" }),
+        createTextElement(document, "p", explanation, { className: "metric-explain" })
+      )
+    );
+  });
+  replaceChildren(document.querySelector("#metricGrid"), cards);
 }
 
 function renderChart(forecast) {
@@ -1001,29 +1123,31 @@ function renderChart(forecast) {
   const y = (value) => height - pad - ((value - min) / Math.max(max - min, 1)) * (height - pad * 2);
   const x = (idx) => pad + (idx / (forecast.length - 1)) * (width - pad * 2);
   const line = (key) => forecast.map((day, idx) => `${x(idx)},${y(day[key])}`).join(" ");
-  const bars = forecast.map((day, idx) => {
+  const nodes = [
+    createSvgElement(document, "rect", { x: 0, y: 0, width, height, fill: "#ffffff" }),
+    createSvgElement(document, "line", { x1: pad, y1: y(0), x2: width - pad, y2: y(0), stroke: "#c2413a", "stroke-dasharray": "5 5" })
+  ];
+  forecast.forEach((day, idx) => {
     const barX = x(idx) - 6;
     const plannedH = Math.max(1, day.plannedIn / Math.max(...forecast.map((d) => d.plannedIn), 1) * 70);
     const outH = Math.max(1, day.outflow / Math.max(...forecast.map((d) => d.outflow), 1) * 70);
-    return `
-      <rect x="${barX}" y="${height - pad - plannedH}" width="5" height="${plannedH}" fill="#2563eb" opacity="0.45"></rect>
-      <rect x="${barX + 6}" y="${height - pad - outH}" width="5" height="${outH}" fill="#c2413a" opacity="0.45"></rect>
-    `;
-  }).join("");
-
-  svg.innerHTML = `
-    <rect x="0" y="0" width="${width}" height="${height}" fill="#ffffff"></rect>
-    <line x1="${pad}" y1="${y(0)}" x2="${width - pad}" y2="${y(0)}" stroke="#c2413a" stroke-dasharray="5 5"></line>
-    ${bars}
-    <polyline fill="none" stroke="#0f9f8e" stroke-width="4" points="${line("balance")}"></polyline>
-    <polyline fill="none" stroke="#6d5bd0" stroke-width="2.5" points="${line("p50Balance")}" opacity="0.8"></polyline>
-    <polyline fill="none" stroke="#c47b16" stroke-width="2.5" points="${line("p80Balance")}" opacity="0.8"></polyline>
-    ${forecast.filter((_, idx) => idx % 5 === 0).map((day, idx) => {
-      const pos = idx * 5;
-      return `<text x="${x(pos)}" y="${height - 10}" text-anchor="middle" font-size="12" fill="#687487">${DATE.format(day.date)}</text>`;
-    }).join("")}
-    <text x="${pad}" y="22" font-size="12" fill="#687487">Остаток денег по сценарным датам реального cash-in</text>
-  `;
+    nodes.push(
+      createSvgElement(document, "rect", { x: barX, y: height - pad - plannedH, width: 5, height: plannedH, fill: "#2563eb", opacity: 0.45 }),
+      createSvgElement(document, "rect", { x: barX + 6, y: height - pad - outH, width: 5, height: outH, fill: "#c2413a", opacity: 0.45 })
+    );
+  });
+  nodes.push(
+    createSvgElement(document, "polyline", { fill: "none", stroke: "#0f9f8e", "stroke-width": 4, points: line("balance") }),
+    createSvgElement(document, "polyline", { fill: "none", stroke: "#6d5bd0", "stroke-width": 2.5, points: line("p50Balance"), opacity: 0.8 }),
+    createSvgElement(document, "polyline", { fill: "none", stroke: "#c47b16", "stroke-width": 2.5, points: line("p80Balance"), opacity: 0.8 })
+  );
+  forecast.forEach((day, idx) => {
+    if (idx % 5 === 0) nodes.push(createSvgElement(document, "text", {
+      x: x(idx), y: height - 10, "text-anchor": "middle", "font-size": 12, fill: "#687487"
+    }, DATE.format(day.date)));
+  });
+  nodes.push(createSvgElement(document, "text", { x: pad, y: 22, "font-size": 12, fill: "#687487" }, "Остаток денег по сценарным датам реального cash-in"));
+  replaceChildren(svg, nodes);
 }
 
 function renderGap(scored, currentForecast) {
@@ -1037,47 +1161,64 @@ function renderGap(scored, currentForecast) {
   const currentDay = currentForecast.find((item) => item.closingBalance === currentMin) ?? currentForecast[0];
   const reserve = Math.max(0, -currentMin);
 
-  document.querySelector("#gapWarning").className = `gap-warning ${currentMin < 0 ? "danger" : ""}`;
-  const riskWindows = scored.map((item) => `${item.counterparty}: ${item.riskWindow}`).join("; ");
-  document.querySelector("#gapWarning").innerHTML = `
-    <strong>${currentMin < 0 ? "Разрыв вероятен" : "Разрыв не подтвержден"}</strong>
-    <p>Разрыв возникает, если обязательные платежи попадают между договорной датой cash-in и сценарной датой фактической оплаты.</p>
-    <p>Минимальный исходящий остаток в сценарии ${scenarioLabel(state.scenario)}: ${formatMoney(currentMin)} на ${DATE.format(currentDay.date)}</p>
-    <p>Риск-окно: <b>${riskWindows || "нет сдвинутых поступлений"}</b></p>
-    <p>Сумма, на которую нужно искать финансирование или останавливать платежи: <b>${formatMoney(reserve)}</b></p>
-  `;
+  const gapWarning = document.querySelector("#gapWarning");
+  gapWarning.className = `gap-warning ${currentMin < 0 ? "danger" : ""}`;
+  const delayKey = `${state.scenario}Delay`;
+  const delayed = scored.filter((item) => Number(item[delayKey]) > 0);
+  const delayedAmount = delayed.reduce((sum, item) => sum + item.amount, 0);
+  const delayedText = createElement(document, "p", {}, "Позже договорной даты: ", createTextElement(document, "b", `${delayed.length} платежей на ${formatMoney(delayedAmount)}`));
+  const reserveText = createElement(document, "p", {}, "Нужно покрыть: ", createTextElement(document, "b", formatMoney(reserve)));
+  replaceChildren(gapWarning, [
+    createTextElement(document, "strong", currentMin < 0 ? "Разрыв вероятен" : "Разрыва нет"),
+    createTextElement(document, "p", `${scenarioLabel(state.scenario)}: минимум ${formatMoney(currentMin)} · ${DATE.format(currentDay.date)}`),
+    delayedText,
+    reserveText
+  ]);
 
-  document.querySelector("#scenarioCards").innerHTML = scenarios.map((item) => `
-    <div class="scenario-card ${item.scenario === state.scenario ? "active" : ""}" aria-label="Минимальный остаток в сценарии ${scenarioLabel(item.scenario)}">
-      <span>${scenarioLabel(item.scenario)}<small>минимальный остаток</small></span>
-      <strong>${formatMoney(item.min)}</strong>
-    </div>
-  `).join("");
+  replaceChildren(document.querySelector("#scenarioCards"), scenarios.map((item) => {
+    const label = createElement(document, "span", {}, scenarioLabel(item.scenario));
+    return createElement(document, "button", {
+      className: `scenario-card ${item.scenario === state.scenario ? "active" : ""}`,
+      attributes: {
+        type: "button",
+        "data-scenario": item.scenario,
+        "aria-pressed": String(item.scenario === state.scenario),
+        "aria-label": `Выбрать сценарий ${scenarioLabel(item.scenario)}. Минимальный остаток ${formatMoney(item.min)}`
+      }
+    }, label, createTextElement(document, "strong", formatMoney(item.min)));
+  }));
 }
 
 function renderCalendar(forecast) {
-  document.querySelector("#calendarRows").innerHTML = forecast.map((day) => {
+  const scope = document.querySelector("#forecastScope");
+  if (scope && forecast.report) {
+    const excluded = forecast.report.excluded;
+    const excludedAmount = excluded.reduce((sum, item) => sum + item.amountMinor, 0) / 100;
+    scope.textContent = excluded.length
+      ? `Горизонт: ${DATE.format(forecast.report.startDate)} — ${DATE.format(forecast.report.endDate)} За границами или исключено: ${excluded.length} событий на ${formatMoney(excludedAmount)}.`
+      : `Горизонт: ${DATE.format(forecast.report.startDate)} — ${DATE.format(forecast.report.endDate)} Все события выбранного сценария входят в расчет.`;
+  }
+  const rows = forecast.map((day) => {
     const status = day.closingBalance < 0
-      ? `<span class="pill bad">разрыв</span>`
+      ? createPill(document, "разрыв", "bad")
       : day.closingBalance < 5_000_000
-        ? `<span class="pill warn">низкий запас</span>`
-        : `<span class="pill good">ок</span>`;
+        ? createPill(document, "низкий запас", "warn")
+        : createPill(document, "ок", "good");
     const gapOrSurplus = day.financingNeed > 0
-      ? `<span class="pill bad">${formatMoney(day.financingNeed)}</span>`
-      : `<span class="pill good">${formatMoney(day.closingBalance)}</span>`;
-    return `
-      <tr>
-        <td>${DATE.format(day.date)}</td>
-        <td class="money" title="Входящий остаток = исходящий остаток предыдущего дня">${formatMoney(day.openingBalance)}</td>
-        <td class="money muted-money" title="Справочно: договорная дата из платежного календаря. В исходящий остаток не прибавляется напрямую.">${formatMoney(day.plannedIn)}</td>
-        <td class="money" title="Сценарные поступления = полная сумма договора на сценарную дату оплаты">${formatMoney(day.expectedIn)}</td>
-        <td class="money" title="Списания = обязательные исходящие платежи на дату">${formatMoney(day.outflow)}</td>
-        <td class="money" title="Исходящий остаток = входящий остаток + сценарные поступления - списания">${formatMoney(day.closingBalance)}</td>
-        <td class="money">${gapOrSurplus}</td>
-        <td>${status}</td>
-      </tr>
-    `;
-  }).join("");
+      ? createPill(document, formatMoney(day.financingNeed), "bad")
+      : createPill(document, formatMoney(day.closingBalance), "good");
+    return createElement(document, "tr", {},
+      createTableCell(document, DATE.format(day.date)),
+      createTableCell(document, formatMoney(day.openingBalance), { className: "money", title: "Входящий остаток = исходящий остаток предыдущего дня" }),
+      createTableCell(document, formatMoney(day.plannedIn), { className: "money muted-money", title: "Справочно: договорная дата из платежного календаря. В исходящий остаток не прибавляется напрямую." }),
+      createTableCell(document, formatMoney(day.expectedIn), { className: "money", title: "Сценарные поступления = полная сумма договора на сценарную дату оплаты" }),
+      createTableCell(document, formatMoney(day.outflow), { className: "money", title: "Списания = обязательные исходящие платежи на дату" }),
+      createTableCell(document, formatMoney(day.closingBalance), { className: "money", title: "Исходящий остаток = входящий остаток + сценарные поступления - списания" }),
+      createTableCell(document, gapOrSurplus, { className: "money" }),
+      createTableCell(document, status)
+    );
+  });
+  replaceChildren(document.querySelector("#calendarRows"), rows);
 }
 
 function renderReceipts(scored) {
@@ -1086,21 +1227,37 @@ function renderReceipts(scored) {
     .sort((a, b) => b.p80Delay - a.p80Delay)
     .slice(0, 20);
 
-  document.querySelector("#receiptRows").innerHTML = rows.map((item) => `
-    <tr>
-      <td><strong>${item.counterparty}</strong><br><span>${item.id}</span></td>
-      <td class="money">${formatMoney(item.amount)}</td>
-      <td>${DATE.format(item.plannedDate)}</td>
-      <td>${DATE.format(item.p50Date)}</td>
-      <td>${DATE.format(item.p80Date)}</td>
-      <td>
-        <strong>+${item.p50Delay} / +${item.p80Delay} дн.</strong>
-        <small>${item.scoreExplanation}</small>
-      </td>
-      <td>${item.riskWindow}</td>
-      <td><span>${item.shiftReason}</span></td>
-    </tr>
-  `).join("");
+  const dateKey = `${state.scenario}Date`;
+  const delayKey = `${state.scenario}Delay`;
+  const heading = document.querySelector("#selectedScenarioDateHeading");
+  if (heading) heading.textContent = `Дата: ${scenarioLabel(state.scenario)}`;
+
+  function timingReason(item) {
+    const evidence = item.timingEvidence ?? {};
+    if (evidence.elapsedOverdueDays > 0) return `Платеж уже просрочен на ${evidence.elapsedOverdueDays} дн.`;
+    if (evidence.source === "counterparty") return `По истории ${evidence.ownSampleSize} прошлых оплат контрагента.`;
+    if (evidence.source === "blended") return `Мало своей истории: учтены ${evidence.ownSampleSize} оплаты контрагента и общая статистика.`;
+    if (evidence.source === "portfolio") return "Новый контрагент: использована общая история платежей компании.";
+    if (evidence.source === "sparse-counterparty") return `Есть только ${evidence.ownSampleSize} прошлых оплат; оценка предварительная.`;
+    return "Истории оплат нет: пока используется договорная дата.";
+  }
+
+  replaceChildren(document.querySelector("#receiptRows"), rows.map((item) => {
+    const counterparty = createTableCell(document, [
+      createTextElement(document, "strong", item.counterparty),
+      document.createElement("br"),
+      createTextElement(document, "span", item.id)
+    ]);
+    const delay = Number(item[delayKey]) || 0;
+    return createElement(document, "tr", {},
+      counterparty,
+      createTableCell(document, formatMoney(item.amount), { className: "money" }),
+      createTableCell(document, DATE.format(item.plannedDate)),
+      createTableCell(document, DATE.format(item[dateKey])),
+      createTableCell(document, delay > 0 ? `${delay} дн. позже` : "В договорную дату"),
+      createTableCell(document, timingReason(item))
+    );
+  }));
 }
 
 function renderDebtors(scored) {
@@ -1129,158 +1286,401 @@ function renderDebtors(scored) {
     .sort((a, b) => b.p80Delay - a.p80Delay)
     .slice(0, 8);
 
-  document.querySelector("#debtorCards").innerHTML = debtors.map((item) => `
-    <article class="debtor-card">
-      <strong>${item.counterparty}</strong>
-      <dl>
-        <dt>Сдвинутая сумма</dt><dd>${formatMoney(item.shiftedAmount)}</dd>
-        <dt>P50 сдвиг</dt><dd>${Math.round(item.p50Delay)} дн.</dd>
-        <dt>P80 сдвиг</dt><dd>${Math.round(item.p80Delay)} дн.</dd>
-        <dt>Средняя задержка</dt><dd>${item.avgDelay ?? "нет истории"}${item.avgDelay === null || item.avgDelay === undefined ? "" : " дн."}</dd>
-      </dl>
-    </article>
-  `).join("");
+  replaceChildren(document.querySelector("#debtorCards"), debtors.map((item) => {
+    const average = item.avgDelay === null || item.avgDelay === undefined ? "нет истории" : `${item.avgDelay} дн.`;
+    const details = createElement(document, "dl", {},
+      createTextElement(document, "dt", "Сдвинутая сумма"), createTextElement(document, "dd", formatMoney(item.shiftedAmount)),
+      createTextElement(document, "dt", "P50 сдвиг"), createTextElement(document, "dd", `${Math.round(item.p50Delay)} дн.`),
+      createTextElement(document, "dt", "P80 сдвиг"), createTextElement(document, "dd", `${Math.round(item.p80Delay)} дн.`),
+      createTextElement(document, "dt", "Средняя задержка"), createTextElement(document, "dd", average)
+    );
+    return createElement(document, "article", { className: "debtor-card" }, createTextElement(document, "strong", item.counterparty), details);
+  }));
 }
 
 function renderActions(scored, forecast) {
-  const minBalance = Math.min(...forecast.map((day) => day.closingBalance));
-  const required = Math.max(0, -minBalance);
-  const { overdraftLimit, factoringLimit, creditLineLimit, liquidityReserve } = state.funding;
-  const topFactoring = scored
-    .filter((item) => item.documentsOk && item.bankMatch && item.p80Delay > 0)
-    .sort((a, b) => (b.amount * b.p80Delay) - (a.amount * a.p80Delay))[0] ?? scored
-    .slice()
-    .sort((a, b) => (b.amount * b.p80Delay) - (a.amount * a.p80Delay))[0];
-  const fundingRecommendation = (limit, availableText, missingText) => required <= 0
-    ? "Не требуется"
-    : limit > 0
-      ? availableText
-      : missingText;
-  const factoringRecommendation = required <= 0
-    ? "Не требуется"
-    : factoringLimit <= 0
-    ? "Нет лимита"
-    : topFactoring?.documentsOk && topFactoring?.bankMatch
-      ? "Доступен"
-      : "Проверить документы и лимит";
-  const movable = state.outflows.filter((item) => item.criticality === "moveable").sort((a, b) => b.amount - a.amount)[0];
-  if (!topFactoring) {
-    document.querySelector("#actionRows").innerHTML = `
-      <tr>
-        <td colspan="7">Недостаточно данных для расчета рекомендаций. Загрузите поступления.</td>
-      </tr>
-    `;
-    return;
-  }
-  const actions = [
-    ["Овердрафт", Math.min(required, overdraftLimit), "14 дней", "19% годовых", "1 день", "средний", fundingRecommendation(overdraftLimit, "Доступен", "Нет лимита")],
-    [`Факторинг по ${topFactoring.counterparty}`, Math.min(required, topFactoring.amount, factoringLimit), topFactoring.riskWindow, "2.1% от суммы", "2-3 дня", "низкий", factoringRecommendation],
-    [movable ? `Перенос платежа: ${movable.category}` : "Перенос платежей", required > 0 && movable ? Math.min(required, movable.amount) : 0, movable ? "7 дней" : "—", "0 / риск отношений", movable ? "сегодня" : "—", "средний", required > 0 && movable ? "Опция" : required > 0 ? "Нет исходящих платежей" : "Не требуется"],
-    ["Кредитная линия", Math.min(required, creditLineLimit), "30 дней", "18% годовых", "5-10 дней", "низкий", fundingRecommendation(creditLineLimit, "Доступна", "Нет лимита")],
-    ["Резерв ликвидности", Math.min(required, liquidityReserve), "сразу", "opportunity cost", "сразу", "низкий", fundingRecommendation(liquidityReserve, "Доступен", "Нет резерва")],
-    ["Остановка/перенос части платежей", required, "до даты разрыва", "0 / риск отношений", "сегодня", "средний", required > 0 ? "Подготовить список" : "Не требуется"]
-  ];
+  const result = simulateFundingCoverage({
+    forecast,
+    receipts: scored,
+    outflows: state.outflows,
+    sources: fundingSources(),
+    asOfDate: forecastStartDate,
+    scenario: state.scenario
+  });
+  const statusLabels = {
+    applied: "Применено",
+    unavailable: "Недоступно",
+    ineligible: "Не подходит",
+    incomplete: "Условия не заполнены"
+  };
+  const rows = result.actions.map((action) => {
+    const factoringTargets = action.targetIds?.length ? action.targetIds.join(", ") : action.targetId;
+    const sourceCell = createTableCell(document, [createTextElement(document, "strong", action.name)]);
+    if (action.type === "factoring" && factoringTargets) sourceCell.append(createTextElement(document, "small", `ДЗ: ${factoringTargets}`));
+    if (action.type === "payment-move" && action.targetId) sourceCell.append(createTextElement(document, "small", `Платеж: ${action.targetId}`));
+    sourceCell.append(createTextElement(document, "small", `Источник условий: ${action.inputSource ?? "не указан"}`));
 
-  document.querySelector("#actionRows").innerHTML = actions.map(([option, amount, term, cost, speed, risk, recommendation]) => `
-    <tr>
-      <td><strong>${option}</strong></td>
-      <td class="money">${formatMoney(amount)}</td>
-      <td>${term}</td>
-      <td>${cost}</td>
-      <td>${speed}</td>
-      <td>${risk}</td>
-      <td>${recommendation}</td>
-    </tr>
-  `).join("");
+    const termCell = createTableCell(document, action.movedToDateIso
+      ? `${formatFundingDate(action.effectiveDateIso)} → ${formatFundingDate(action.movedToDateIso)}`
+      : formatFundingDate(action.effectiveDateIso));
+    if (!action.movedToDateIso && action.termDays !== null) {
+      termCell.append(createTextElement(document, "small", `${action.termDays} дн.${action.repaymentDateIso ? `, погашение ${formatFundingDate(action.repaymentDateIso)}` : ""}`));
+    }
+
+    const costCell = createTableCell(document, action.costMinor === null
+      ? createTextElement(document, "span", "Не рассчитана", { className: "muted" })
+      : [createTextElement(document, "span", formatMinorMoney(action.costMinor)), createTextElement(document, "small", action.costFormula)]);
+
+    const limitCell = createTableCell(document, action.type === "payment-move" ? "не применяется" : [
+      createTextElement(document, "span", `${formatMinorMoney(action.usedLimitMinor)} / ${formatMinorMoney(action.limitMinor)}`),
+      createTextElement(document, "small", `остаток ${formatMinorMoney(action.remainingLimitMinor)}`)
+    ]);
+    const statusCell = createTableCell(document, [
+      createTextElement(document, "span", statusLabels[action.status], { className: `action-status ${action.status}` }),
+      createTextElement(document, "small", action.reason),
+      createTextElement(document, "strong", `Остаток: ${formatMinorMoney(action.remainingGapMinor)}`)
+    ]);
+    return createElement(document, "tr", { dataset: { status: action.status } },
+      sourceCell,
+      createTableCell(document, formatMinorMoney(action.appliedAmountMinor), { className: "money" }),
+      termCell,
+      costCell,
+      limitCell,
+      createTableCell(document, action.constraints.join("; ") || "—"),
+      statusCell
+    );
+  });
+  const uncoveredSource = createTableCell(document, [
+    createTextElement(document, "strong", "Непокрытый остаток"),
+    createTextElement(document, "small", "После применения всех источников по очереди")
+  ]);
+  const totalCost = createTableCell(document, [
+    createTextElement(document, "span", formatMinorMoney(result.totalCostMinor)),
+    createTextElement(document, "small", "совокупная рассчитанная стоимость")
+  ]);
+  rows.push(createElement(document, "tr", { className: "uncovered-row" },
+    uncoveredSource,
+    createTableCell(document, formatMinorMoney(result.uncoveredNeedMinor), { className: "money" }),
+    createTableCell(document, result.affectedDates.length ? `${result.affectedDates.length} дн.` : "—"),
+    totalCost,
+    createTableCell(document, "—"),
+    createTableCell(document, result.affectedDates.length ? `Даты: ${result.affectedDates.map(formatFundingDate).join(", ")}` : "Разрыв закрыт"),
+    createTableCell(document, createTextElement(document, "span", result.fullyCovered ? "Покрыт" : "Требуется решение", {
+      className: `action-status ${result.fullyCovered ? "applied" : "incomplete"}`
+    }))
+  ));
+  replaceChildren(document.querySelector("#actionRows"), rows);
 }
 
 function renderIntake() {
-  document.querySelector("#intakeList").innerHTML = intakeItems.map(([title, text]) => `
-    <label class="check-item">
-      <strong><input type="checkbox" checked> ${title}</strong>
-      <span>${text}</span>
-    </label>
-  `).join("");
+  replaceChildren(document.querySelector("#intakeList"), intakeItems.map(([title, text]) => {
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = true;
+    const heading = createElement(document, "strong", {}, checkbox, ` ${title}`);
+    return createElement(document, "label", { className: "check-item" }, heading, createTextElement(document, "span", text));
+  }));
 }
 
 function renderFactors() {
   const items = [
     ["История задержек", "Основной источник P50/P80/P90. В Excel это колонка \"История задержек, дней\": например 0;1;4;14;30."],
-    ["Fallback без истории", "Если истории нет, но есть средняя задержка, документы и банковский матчинг, MVP строит осторожную дату по этим признакам."],
-    ["Новый контрагент", "Если это первый платеж и истории нет, MVP ставит P50/P80/P90/Stress на договорную дату, надежность срока 100%, но помечает расчет как \"нет истории\"."],
+    ["Малая выборка", "Для 1-4 оплат собственная история смешивается с портфельной: вес контрагента равен числу его оплат, деленному на 5."],
+    ["Новый контрагент", "Договорная дата остается базовой, сценарные даты используют портфельную историю. Строка помечается как \"нет собственной истории\" и не получает надежность 100%."],
     ["Сценарии", "P50/P80/P90/Stress меняют дату полного платежа. Сумма платежа не дробится по вероятности."]
   ];
 
-  document.querySelector("#riskFactors").innerHTML = items.map(([title, text]) => `
-    <div class="factor-item">
-      <strong>${title}</strong>
-      <span>${text}</span>
-    </div>
-  `).join("");
+  replaceChildren(document.querySelector("#riskFactors"), items.map(([title, text]) =>
+    createElement(document, "div", { className: "factor-item" },
+      createTextElement(document, "strong", title),
+      createTextElement(document, "span", text)
+    )
+  ));
 }
 
 function exportReport() {
-  const scored = state.receipts.map(scoreReceipt).sort((a, b) => b.p80Delay - a.p80Delay);
-  const header = ["invoice_id","counterparty","amount","planned_date","p50_date","p80_date","p90_date","stress_date","p50_shift_days","p80_shift_days","risk_window"];
-  const rows = scored.map((item) => [
-    item.id,
-    item.counterparty,
-    item.amount,
-    item.plannedDate.toISOString().slice(0, 10),
-    item.p50Date.toISOString().slice(0, 10),
-    item.p80Date.toISOString().slice(0, 10),
-    item.p90Date.toISOString().slice(0, 10),
-    item.stressDate.toISOString().slice(0, 10),
-    item.p50Delay,
-    item.p80Delay,
-    item.riskWindow
-  ]);
-  const escapeCsv = (value) => {
-    const text = String(value ?? "");
-    return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
-  };
-  const csv = [header, ...rows].map((row) => row.map(escapeCsv).join(",")).join("\n");
+  const view = runController.view();
+  const run = view.committed;
+  const csv = buildCommittedRunCsv(run);
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = "cash-in-risk-audit.csv";
+  link.download = `cash-in-risk-audit-${run.runId}.csv`;
+  document.body.append(link);
   link.click();
-  URL.revokeObjectURL(url);
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1_000);
+  setUploadStatus(`${view.visibleRunIsPrevious ? "Экспортирован предыдущий " : "Экспортирован "}зафиксированный расчет ${run.runId}.`, "success");
 }
 
-document.querySelector("#exportButton").addEventListener("click", exportReport);
+const workflowSteps = [
+  { title: "Загрузить данные", description: "Добавьте Excel. Затем проверьте дату расчета и остаток денег." },
+  { title: "Проверить загрузку", description: "Убедитесь, что Excel прочитан без ошибок, а поступления банка сопоставлены с ДЗ." },
+  { title: "Посмотреть прогноз и кассовый разрыв", description: "Сравните сценарные даты, минимальный остаток и потребность в ликвидности." },
+  { title: "Выбрать план покрытия", description: "Укажите подтвержденные лимиты и пересчитайте стоимость покрытия." },
+  { title: "Подтвердить и скачать отчет CFO", description: "Подтвердите сверку, готовность отчета и скачайте файлы." }
+];
 
-document.querySelector("#loadSampleButton").addEventListener("click", () => {
-  loadDemo();
+let workflowStep = 1;
+let pendingWorkflowTarget = null;
+
+function hasCurrentWorkflowRun() {
+  return runController.view().status === RUN_STATUS.CURRENT;
+}
+
+function setWorkflowStep(nextStep, { scroll = false } = {}) {
+  const requestedStep = Math.min(workflowSteps.length, Math.max(1, Number(nextStep) || 1));
+  const runStatus = runController.view().status;
+  const keepFundingDraft = requestedStep === 4 && workflowStep === 4 && runStatus === RUN_STATUS.STALE;
+  workflowStep = requestedStep > 2 && !hasCurrentWorkflowRun() && !keepFundingDraft ? 2 : requestedStep;
+  document.body.dataset.workflowStep = String(workflowStep);
+  const current = workflowSteps[workflowStep - 1];
+  const kicker = document.querySelector("#workflowKicker");
+  const title = document.querySelector("#workflowTitle");
+  const description = document.querySelector("#workflowDescription");
+  if (kicker) kicker.textContent = `Шаг ${workflowStep} из ${workflowSteps.length}`;
+  if (title) title.textContent = current.title;
+  if (description) description.textContent = current.description;
+  document.querySelectorAll("[data-workflow-target]").forEach((button) => {
+    const target = Number(button.dataset.workflowTarget);
+    if (target === workflowStep) button.setAttribute("aria-current", "step");
+    else button.removeAttribute("aria-current");
+    button.dataset.complete = String(target < workflowStep);
+    const canCalculatePreparedData = [RUN_STATUS.STAGED, RUN_STATUS.STALE].includes(runStatus);
+    button.disabled = target > 2 && !hasCurrentWorkflowRun() && !canCalculatePreparedData && !(target === 4 && keepFundingDraft);
+    button.dataset.requiresCalculation = String(target > 2 && !hasCurrentWorkflowRun() && canCalculatePreparedData);
+  });
+  const previous = document.querySelector("#workflowPrevButton");
+  const next = document.querySelector("#workflowNextButton");
+  if (previous) previous.disabled = workflowStep === 1;
+  if (next) {
+    const status = runStatus;
+    next.disabled = workflowStep === workflowSteps.length || (workflowStep === 2 && ![RUN_STATUS.CURRENT, RUN_STATUS.STAGED, RUN_STATUS.STALE].includes(status));
+    if (workflowStep > 2 && status !== RUN_STATUS.CURRENT) next.disabled = true;
+    next.textContent = ["Перейти к проверке", status === RUN_STATUS.CURRENT ? "Показать прогноз" : "Рассчитать и показать прогноз", "Выбрать покрытие", "Подготовить отчет", "Готово"][workflowStep - 1];
+  }
+  const calculate = document.querySelector("#calculateRunButton");
+  if (calculate) calculate.textContent = workflowStep === 4 ? "Пересчитать план покрытия" : "Рассчитать и показать прогноз";
+  const feedback = document.querySelector("#calculationFeedback");
+  if (feedback && workflowStep !== 4) feedback.hidden = true;
+  if (scroll) document.querySelector("#workflow")?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function renderQualitySummary() {
+  const target = document.querySelector("#qualitySummary");
+  if (!target) return;
+  const view = runController.view();
+  const report = view.status === RUN_STATUS.ERROR
+    ? state.importReport ?? {}
+    : view.staged?.data?.qualityReport ?? view.committed?.qualityReport ?? state.importReport ?? {};
+  const reconciliation = report.reconciliation ?? {};
+  const counts = {
+    unmatchedPayments: Number.isInteger(reconciliation.unmatchedPayments) ? reconciliation.unmatchedPayments : 0,
+    pendingAllocations: Number.isInteger(reconciliation.pendingAllocations) ? reconciliation.pendingAllocations : 0,
+    errors: Array.isArray(report.errors) ? report.errors.length : 0,
+    warnings: Array.isArray(report.warnings) ? report.warnings.length : 0
+  };
+  const ready = counts.errors === 0;
+  target.dataset.tone = ready ? "success" : "error";
+  replaceChildren(target, [
+    createTextElement(document, "strong", ready ? "Данные готовы к расчету" : "Исправьте ошибки перед расчетом"),
+    createTextElement(document, "span", `Ошибки в Excel: ${counts.errors}`),
+    createTextElement(document, "span", `Поступления банка без найденной ДЗ: ${counts.unmatchedPayments}`),
+    createTextElement(document, "span", `Платежи для ручного распределения: ${counts.pendingAllocations}`),
+    createTextElement(document, "span", `Предупреждения: ${counts.warnings}`)
+  ]);
+}
+
+async function downloadAuditSnapshot() {
+  const run = runController.view().committed;
+  if (!run) throw new Error("Сначала выполните расчет.");
+  const snapshot = await createAuditSnapshot(run);
+  const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `cash-in-risk-audit-${run.runId}.json`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1_000);
+}
+
+async function importAuditSnapshot(file) {
+  if (!file) throw new SnapshotValidationError("Выберите файл расчета в формате JSON.");
+  const snapshot = await parseAuditSnapshot(await file.text());
+  const recalculated = calculateRun(snapshot.run.inputs);
+  const recalculatedHash = await sha256Hex(recalculated.outputs);
+  if (recalculatedHash !== snapshot.integrity.financialResultSha256) {
+    throw new SnapshotValidationError("Файл расчета не воспроизводится текущими версиями расчетных моделей.", "REPRODUCTION_MISMATCH");
+  }
+  runController.restore(snapshot.run);
+  applyCommittedInputs(snapshot.run.inputs, snapshot.run.sources, snapshot.run.qualityReport);
   render();
+  renderImportReport();
+  renderRunStatus();
+  setUploadStatus(`Файл расчета ${snapshot.run.runId} проверен, расчет восстановлен.`, "success");
+  return snapshot.run;
+}
+
+document.querySelector("#startWorkflowButton")?.addEventListener("click", (event) => {
+  event.preventDefault();
+  document.body.classList.add("workflow-started");
+  setWorkflowStep(1, { scroll: true });
+  document.querySelector("#excelInput")?.click();
 });
 
-document.querySelector("#parseExcelButton").addEventListener("click", async () => {
+document.querySelector('.nav-list a[href="#workflow"]')?.addEventListener("click", (event) => {
+  event.preventDefault();
+  document.body.classList.add("workflow-started");
+  setWorkflowStep(1, { scroll: true });
+});
+
+document.querySelectorAll("[data-workflow-target]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const target = Number(button.dataset.workflowTarget);
+    if (target > 2 && !hasCurrentWorkflowRun()) {
+      pendingWorkflowTarget = target;
+      document.querySelector("#calculateRunButton")?.click();
+      return;
+    }
+    setWorkflowStep(target, { scroll: true });
+  });
+});
+
+document.querySelector("#workflowPrevButton")?.addEventListener("click", () => {
+  setWorkflowStep(workflowStep - 1, { scroll: true });
+});
+
+document.querySelector("#workflowNextButton")?.addEventListener("click", () => {
+  if (workflowStep === 2 && !hasCurrentWorkflowRun()) {
+    document.querySelector("#calculateRunButton")?.click();
+    return;
+  }
+  setWorkflowStep(workflowStep + 1, { scroll: true });
+});
+
+document.querySelector("#exportButton").addEventListener("click", () => {
   try {
-    const file = document.querySelector("#excelInput").files[0];
-    setUploadStatus("Читаю Excel-файл и пересчитываю модель...", "neutral");
-    const data = await readExcelFile(file);
-    state.receipts = data.receipts;
-    state.outflows = data.outflows;
-    if (data.balance) {
+    exportReport();
+  } catch (error) {
+    setUploadStatus(error.message, "error");
+  }
+});
+
+document.querySelector("#loadSampleButton").addEventListener("click", async () => {
+  runController.reset();
+  priorSnapshot = null;
+  selectedPriorLedger = null;
+  const operatorInput = document.querySelector("#signOffOperatorInput");
+  if (operatorInput) operatorInput.value = "";
+  loadDemo();
+  render();
+  renderRunStatus();
+  try {
+    await executeCurrentRun();
+    setWorkflowStep(1, { scroll: true });
+  } catch (error) {
+    setUploadStatus(error.message, "error");
+  }
+});
+
+async function prepareExcelFile(file) {
+  if (!file) return;
+  const input = document.querySelector("#excelInput");
+  const uploadZone = document.querySelector(".upload-zone");
+  const fileName = document.querySelector("#selectedFileName");
+  try {
+    input.disabled = true;
+    uploadZone?.setAttribute("aria-busy", "true");
+    if (fileName) fileName.textContent = file.name;
+    setUploadStatus("Читаю и проверяю Excel-файл...", "neutral");
+    const uploaded = await readExcelFile(file, { fallbackDate: forecastStartDate });
+    if (uploaded.kind === "bank-update" && !selectedPriorLedger) {
+      throw new Error("Для обновления только банка сначала загрузите прошлый файл расчета и явно выберите его как базу.");
+    }
+    const data = uploaded.kind === "bank-update"
+      ? applyBankUpdateToPriorLedger(selectedPriorLedger.run.inputs.canonicalLedger, uploaded)
+      : uploaded;
+    state.importReport = data.report;
+    renderImportReport();
+    if (uploaded.kind === "bank-update") {
+      setUploadStatus(`Банк проверен на ${data.asOfDate.toLocaleDateString("ru-RU")}; предыдущий расчет остается на экране до нового запуска.`, "success");
+    } else if (data.balance) {
       forecastStartDate = data.balance.date;
       state.openingBalance = data.balance.openingBalance;
-      syncBalanceControls("Источник: лист Остатки из загруженного Excel. Можно изменить вручную.");
+      syncBalanceControls(data.bankFreshness
+        ? `Банк: остаток на конец ${data.bankFreshness.sourceCloseDate}; дата расчета ${data.asOfDate.toLocaleDateString("ru-RU")}. Получено ${data.bankFreshness.observedAt}. До расчета показан предыдущий результат.`
+        : "Подготовлено из листа Остатки. До нового расчета на экране остается предыдущий результат.");
     } else {
-      const inferredStartDate = inferForecastStartDate(state.receipts, state.outflows);
+      const inferredStartDate = inferForecastStartDate(data.receipts, data.outflows);
       if (inferredStartDate) {
         forecastStartDate = inferredStartDate;
-        syncBalanceControls("Источник: дата старта автоматически взята из загруженных поступлений/исходящих. Остаток — из интерфейса.");
+        syncBalanceControls("Дата подготовлена из Excel, остаток взят из интерфейса. До расчета показан предыдущий результат.");
       } else {
         syncBalanceControls("Источник: значение из интерфейса. Лист Остатки в Excel не найден.");
       }
     }
-    render();
-    setUploadStatus(`Загружено: ${file.name}. Поступлений: ${state.receipts.length}, исходящих платежей: ${state.outflows.length}.`, "success");
+    const fileSha256 = await sha256Hex(await file.arrayBuffer());
+    const canonicalLedger = data.kind === "canonical"
+      ? canonicalLedgerForRun({
+        reconciliation: data.reconciliation,
+        outflows: data.outflows,
+        bankBalances: data.bankBalances ?? [],
+        balance: data.balance ?? { openingBalance: state.openingBalance },
+        asOfDate: data.asOfDate
+      }) : data.canonicalLedger ?? null;
+    const staged = {
+      receipts: data.receipts,
+      outflows: data.outflows,
+      asOfDate: data.asOfDate ?? forecastStartDate,
+      openingBalance: canonicalLedger ? canonicalLedger.openingBalanceMinor / 100 : data.balance?.openingBalance ?? state.openingBalance,
+      canonicalLedger,
+      dataSources: [...(uploaded.kind === "bank-update" ? selectedPriorLedger.run.sources.map((source) => ({
+        ...source,
+        inheritedFromRunId: selectedPriorLedger.run.runId,
+        planningAsOfDate: source.planningAsOfDate ?? null
+      })) : []), {
+        type: "xlsx",
+        name: file.name,
+        sizeBytes: file.size,
+        lastModified: file.lastModified ? new Date(file.lastModified).toISOString() : null,
+        sha256: fileSha256,
+        bankBalanceCloseDate: data.bankFreshness?.sourceCloseDate ?? null,
+        observedAt: data.bankFreshness?.observedAt ?? null,
+        bankAccountCount: data.bankFreshness?.accountCount ?? null,
+        bankAccounts: data.bankBalances?.map((item) => `${item.bankId}|${item.legalEntityId}|${item.accountId}`) ?? [],
+        planningAsOfDate: uploaded.kind === "bank-update" ? null : dateOnly(data.asOfDate ?? forecastStartDate),
+        baseRunId: uploaded.kind === "bank-update" ? selectedPriorLedger.run.runId : null
+      }],
+      qualityReport: data.report
+    };
+    runController.stage(staged, { fileName: file.name });
+    const acceptance = document.querySelector("#uncoveredGapAcceptanceInput");
+    if (acceptance) acceptance.checked = false;
+    renderRunStatus();
+    setUploadStatus(uploaded.kind === "bank-update"
+      ? `Данные подготовлены из run ${selectedPriorLedger.run.runId}: банк ${uploaded.payments.length} операций, открытых ДЗ ${data.receipts.length}. Нажмите «Рассчитать прогноз».`
+      : `Проверка завершена: поступлений ${data.receipts.length}, исходящих ${data.outflows.length}.`, "success");
+    setWorkflowStep(2, { scroll: true });
   } catch (error) {
+    if (error instanceof ExcelIntakeError && error.report) {
+      state.importReport = error.report;
+      renderImportReport();
+    }
+    runController.fail(error);
+    renderRunStatus();
     setUploadStatus(error.message, "error");
+    setWorkflowStep(2, { scroll: true });
+  } finally {
+    input.disabled = false;
+    uploadZone?.removeAttribute("aria-busy");
   }
+}
+
+document.querySelector("#excelInput")?.addEventListener("change", (event) => {
+  prepareExcelFile(event.target.files[0]);
 });
 
 document.querySelector("#openingBalanceInput").addEventListener("input", (event) => {
@@ -1288,22 +1688,49 @@ document.querySelector("#openingBalanceInput").addEventListener("input", (event)
   state.openingBalance = Number.isFinite(value) ? Math.max(0, value) : 0;
   const source = document.querySelector("#openingBalanceSource");
   if (source) source.textContent = "Источник: ручной ввод во фронте.";
-  render();
+  markRunStale("Изменен входящий остаток.");
+});
+
+const zeroDefaultFundingFields = new Set([
+  "liquidityReserve", "reserveLeadDays", "reserveMinDraw", "factoringLimit", "factoringMinDraw",
+  "overdraftLimit", "overdraftMinDraw", "creditLineLimit", "creditLineMinDraw"
+]);
+
+[
+  ["liquidityReserveInput", "liquidityReserve"], ["reserveLeadDaysInput", "reserveLeadDays"],
+  ["reserveTermDaysInput", "reserveTermDays"], ["reserveRatePctInput", "reserveRatePct"],
+  ["reserveMinDrawInput", "reserveMinDraw"], ["paymentMoveDaysInput", "paymentMoveDays"],
+  ["paymentMoveCostInput", "paymentMoveCost"], ["factoringLimitInput", "factoringLimit"],
+  ["factoringLeadDaysInput", "factoringLeadDays"], ["factoringTermDaysInput", "factoringTermDays"],
+  ["factoringFeePctInput", "factoringFeePct"], ["factoringMinDrawInput", "factoringMinDraw"],
+  ["overdraftLimitInput", "overdraftLimit"], ["overdraftLeadDaysInput", "overdraftLeadDays"],
+  ["overdraftTermDaysInput", "overdraftTermDays"], ["overdraftRatePctInput", "overdraftRatePct"],
+  ["overdraftMinDrawInput", "overdraftMinDraw"], ["creditLineLimitInput", "creditLineLimit"],
+  ["creditLineLeadDaysInput", "creditLineLeadDays"], ["creditLineTermDaysInput", "creditLineTermDays"],
+  ["creditLineRatePctInput", "creditLineRatePct"], ["creditLineMinDrawInput", "creditLineMinDraw"]
+].forEach(([id, key]) => {
+  const updateFundingValue = (event) => {
+    const raw = event.target.value;
+    const value = raw === "" ? null : Number(raw);
+    state.funding[key] = Number.isFinite(value) ? Math.max(0, value) : zeroDefaultFundingFields.has(key) ? 0 : null;
+    fundingProvenance = { inputSource: "Ручной ввод в интерфейсе", sourceRunId: null, sourceCreatedAt: null, sourceAsOfDate: null };
+    markRunStale("Изменены условия финансирования.");
+  };
+  document.querySelector(`#${id}`)?.addEventListener("input", updateFundingValue);
+  document.querySelector(`#${id}`)?.addEventListener("change", updateFundingValue);
 });
 
 [
-  ["#overdraftLimitInput", "overdraftLimit"],
-  ["#factoringLimitInput", "factoringLimit"],
-  ["#creditLineLimitInput", "creditLineLimit"],
-  ["#liquidityReserveInput", "liquidityReserve"]
-].forEach(([selector, key]) => {
-  const updateFundingLimit = (event) => {
-    const value = Number(event.target.value);
-    state.funding[key] = Number.isFinite(value) ? Math.max(0, value) : 0;
-    render();
-  };
-  document.querySelector(selector)?.addEventListener("input", updateFundingLimit);
-  document.querySelector(selector)?.addEventListener("change", updateFundingLimit);
+  ["reserveAvailableDateInput", "reserveAvailableDate"],
+  ["factoringAvailableDateInput", "factoringAvailableDate"],
+  ["overdraftAvailableDateInput", "overdraftAvailableDate"],
+  ["creditLineAvailableDateInput", "creditLineAvailableDate"]
+].forEach(([id, key]) => {
+  document.querySelector(`#${id}`)?.addEventListener("change", (event) => {
+    state.funding[key] = event.target.value ? normalizeDate(event.target.value) : null;
+    fundingProvenance = { inputSource: "Ручной ввод в интерфейсе", sourceRunId: null, sourceCreatedAt: null, sourceAsOfDate: null };
+    markRunStale("Изменены условия финансирования.");
+  });
 });
 
 document.querySelector("#startDateInput").addEventListener("change", (event) => {
@@ -1312,23 +1739,201 @@ document.querySelector("#startDateInput").addEventListener("change", (event) => 
     forecastStartDate = date;
     const source = document.querySelector("#openingBalanceSource");
     if (source) source.textContent = "Источник: ручной ввод во фронте.";
-    render();
+    markRunStale("Изменена стартовая дата.");
   }
 });
 
-document.querySelector("#stressModeButton").addEventListener("click", () => {
-  setScenario(state.scenario === "stress" ? "p50" : "stress");
-  render();
-});
+let scenarioChangePending = false;
 
-document.querySelectorAll(".segmented button").forEach((button) => {
-  button.addEventListener("click", () => {
-    setScenario(button.dataset.scenario);
+async function selectScenarioAndRecalculate(scenario) {
+  if (scenarioChangePending || scenario === state.scenario) return;
+  scenarioChangePending = true;
+  document.querySelector(".forecast-layout")?.setAttribute("aria-busy", "true");
+  try {
+    setScenario(scenario);
+    markRunStale("Изменен сценарий прогноза.");
     render();
-  });
+    await executeCurrentRun();
+    setUploadStatus(`${scenarioLabel(scenario)} рассчитан.`, "success");
+  } catch (error) {
+    setUploadStatus(error.message, "error");
+  } finally {
+    scenarioChangePending = false;
+    document.querySelector(".forecast-layout")?.removeAttribute("aria-busy");
+  }
+}
+
+document.querySelector("#stressModeButton").addEventListener("click", () => {
+  selectScenarioAndRecalculate(state.scenario === "stress" ? "p50" : "stress");
 });
 
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-scenario]");
+  if (button) selectScenarioAndRecalculate(button.dataset.scenario);
+});
+
+document.querySelector("#calculateRunButton")?.addEventListener("click", async () => {
+  const button = document.querySelector("#calculateRunButton");
+  const feedback = document.querySelector("#calculationFeedback");
+  const originalLabel = button.textContent;
+  try {
+    const startedFromStep = workflowStep;
+    button.textContent = startedFromStep === 4 ? "Пересчитываю покрытие..." : "Считаю прогноз...";
+    button.disabled = true;
+    if (feedback) feedback.hidden = true;
+    await executeCurrentRun();
+    const brief = buildOperatorBrief(runController.view().committed);
+    setUploadStatus(brief?.forecastStatus === "requires-planning-update"
+      ? "Расчет выполнен, но прогноз требует свежей полной выгрузки ДЗ и исходящих."
+      : "Расчет успешно зафиксирован. Результат актуален.", brief?.forecastStatus === "requires-planning-update" ? "warning" : "success");
+    if (startedFromStep === 2) {
+      const targetStep = pendingWorkflowTarget ?? 3;
+      pendingWorkflowTarget = null;
+      setWorkflowStep(targetStep, { scroll: true });
+    } else if (startedFromStep === 4 && feedback) {
+      const coveredMinor = Math.max(0, brief.maximumNeedMinor - brief.uncoveredNeedMinor);
+      feedback.textContent = `План покрытия обновлен. Потребность: ${formatMinorMoney(brief.maximumNeedMinor)} · Покрыто: ${formatMinorMoney(coveredMinor)} · Стоимость: ${formatMinorMoney(brief.coverageCostMinor)} · Не покрыто: ${formatMinorMoney(brief.uncoveredNeedMinor)}`;
+      feedback.dataset.tone = brief.uncoveredNeedMinor > 0 ? "warning" : "success";
+      feedback.hidden = false;
+      feedback.focus({ preventScroll: true });
+      feedback.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  } catch (error) {
+    pendingWorkflowTarget = null;
+    setUploadStatus(error.message, "error");
+    if (feedback) {
+      feedback.textContent = `Не удалось обновить план покрытия: ${error.message}`;
+      feedback.dataset.tone = "error";
+      feedback.hidden = false;
+    }
+  } finally {
+    button.disabled = false;
+    button.textContent = originalLabel;
+  }
+});
+
+document.querySelector("#downloadSnapshotButton")?.addEventListener("click", async () => {
+  try {
+    await downloadAuditSnapshot();
+  } catch (error) {
+    setUploadStatus(error.message, "error");
+  }
+});
+
+document.querySelector("#uploadSnapshotButton")?.addEventListener("click", () => {
+  document.querySelector("#snapshotInput")?.click();
+});
+
+document.querySelector("#uploadPriorSnapshotButton")?.addEventListener("click", () => {
+  document.querySelector("#priorSnapshotInput")?.click();
+});
+
+document.querySelector("#priorSnapshotInput")?.addEventListener("change", async (event) => {
+  try {
+    const file = event.target.files[0];
+    if (!file) throw new SnapshotValidationError("Выберите файл предыдущего расчета в формате JSON.");
+    const currentRunId = runController.view().committed?.runId;
+    const parsed = await parseAuditSnapshot(await file.text());
+    priorSnapshot = parsed;
+    selectedPriorLedger = null;
+    renderComparison();
+    setUploadStatus(`Предыдущий расчет ${parsed.run.runId} загружен только для сравнения. Текущий run ${currentRunId ?? "не создан"} не заменен.`, "success");
+  } catch (error) {
+    setUploadStatus(`Файл предыдущего расчета отклонен: ${error.message}`, "error");
+  } finally {
+    event.target.value = "";
+  }
+});
+
+document.querySelector("#applyPriorLedgerButton")?.addEventListener("click", () => {
+  try {
+    const run = priorSnapshot?.run;
+    const ledger = run?.inputs?.canonicalLedger;
+    if (!ledger?.bankBalances?.length) throw new Error("В прошлом файле нет закрытых банковских остатков для переноса.");
+    selectedPriorLedger = { run };
+    renderPriorLedgerChoice();
+    setUploadStatus(`База run ${run.runId} выбрана явно. Текущий расчет не изменен; загрузите новый Bank + BankBalances.`, "success");
+    setWorkflowStep(1, { scroll: true });
+  } catch (error) {
+    setUploadStatus(error.message, "error");
+  }
+});
+
+document.querySelector("#applyPriorFundingButton")?.addEventListener("click", () => {
+  try {
+    const run = priorSnapshot?.run;
+    const sources = run?.inputs?.fundingSources;
+    if (!run || !Array.isArray(sources) || sources.length === 0) {
+      throw new Error("В файле предыдущего расчета нет условий финансирования для переноса.");
+    }
+    state.funding = fundingStateFromSources(sources);
+    fundingProvenance = {
+      inputSource: `Файл предыдущего расчета ${run.runId}`,
+      sourceRunId: run.runId,
+      sourceCreatedAt: run.createdAt,
+      sourceAsOfDate: run.asOfDate
+    };
+    syncFundingControls();
+    markRunStale(`Применены коммерческие условия финансирования из предыдущего расчета ${run.runId}.`);
+    setUploadStatus(`Перенесены только коммерческие условия из run ${run.runId}. Использованные суммы и funding plan будут рассчитаны заново.`, "success");
+  } catch (error) {
+    setUploadStatus(error.message, "error");
+  }
+});
+
+document.querySelector("#confirmReconciliationButton")?.addEventListener("click", () => {
+  try {
+    runController.confirmReconciliation(document.querySelector("#signOffOperatorInput")?.value);
+    renderRunStatus();
+    setUploadStatus("Сверка подтверждена для текущего run.", "success");
+  } catch (error) {
+    setUploadStatus(error.message, "error");
+  }
+});
+
+document.querySelector("#confirmCfoButton")?.addEventListener("click", () => {
+  try {
+    runController.confirmCfoReport(document.querySelector("#signOffOperatorInput")?.value, {
+      uncoveredGapAccepted: Boolean(document.querySelector("#uncoveredGapAcceptanceInput")?.checked)
+    });
+    renderRunStatus();
+    setUploadStatus("Готовность отчета CFO подтверждена для текущего run.", "success");
+  } catch (error) {
+    setUploadStatus(error.message, "error");
+  }
+});
+
+document.querySelector("#uncoveredGapAcceptanceInput")?.addEventListener("change", () => {
+  renderSignOff();
+});
+
+document.querySelector("#snapshotInput")?.addEventListener("change", async (event) => {
+  try {
+    await importAuditSnapshot(event.target.files[0]);
+  } catch (error) {
+    runController.fail(error);
+    renderRunStatus();
+    setUploadStatus(error.message, "error");
+  } finally {
+    event.target.value = "";
+  }
+});
+
+window.addEventListener("beforeunload", (event) => {
+  const { status } = runController.view();
+  if (![RUN_STATUS.STAGED, RUN_STATUS.STALE, RUN_STATUS.RUNNING].includes(status)) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
+
+setWorkflowStep(1);
 loadDemo();
 syncFundingControls();
 setScenario(state.scenario);
 render();
+renderRunStatus();
+try {
+  await executeCurrentRun();
+} catch (error) {
+  setUploadStatus(error.message, "error");
+}

@@ -3,8 +3,10 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; worker-src 'none'; manifest-src 'none'" />
+    <link rel="icon" href="data:," />
     <title>Cash-In Risk Radar — Cash Gap Audit</title>
-    <link rel="stylesheet" href="styles.css?v=qa-model-sheet-1" />
+    <link rel="stylesheet" href="styles.css?v=workflow-audit-2" />
   </head>
   <body>
     <div class="app-shell">
@@ -17,113 +19,108 @@
           </div>
         </div>
         <nav class="nav-list">
-          <a href="#dashboard" class="active" aria-current="page">Радар</a>
-          <a href="#product-v2">Рабочий контур</a>
-          <a href="#calendar">Календарь</a>
-          <a href="#receipts">Поступления</a>
-          <a href="#debtors">Контрагенты</a>
-          <a href="#actions">Действия</a>
-          <a href="#ai-trust">LLM-контур</a>
-          <a href="#data">Данные</a>
+          <a href="#workflow" class="active" aria-current="page">Расчет</a>
         </nav>
         <div class="sidebar-card">
-          <span>ICP v0</span>
-          <strong>B2B 1-30 млрд руб.</strong>
-          <p>50+ дебиторов, постоплата 15-90 дней, календарь в Excel/1C/BI.</p>
+          <span>Пилот</span>
+          <strong>B2B с постоплатой</strong>
         </div>
       </aside>
 
       <main>
         <header class="sales-hero">
           <div class="sales-hero-copy">
-            <p class="eyebrow">Cash Gap Audit для компаний с постоплатой</p>
-            <h1>За 5 дней покажем, какие деньги сдвинутся и какой кассовый разрыв это создаст</h1>
-            <p class="hero-subtitle">CFO получает audit memo поверх платежного календаря: договорная дата, сценарная дата поступления, риск-окно, минимальный остаток и план покрытия.</p>
-            <ul class="hero-outcomes" aria-label="Что показывает аудит">
-              <li>какие деньги не считать доступными на договорную дату</li>
-              <li>когда появляется минимальный остаток и cash gap</li>
-              <li>какое действие закрывает разрыв: резерв, перенос, факторинг или лимит</li>
-            </ul>
+            <p class="hero-kicker">Контроль ликвидности на 30 дней</p>
+            <h1>Деньги задержатся. Вы узнаете об этом раньше.</h1>
+            <p class="hero-subtitle">Cash-In Risk Radar переносит поступления на реалистичные даты, находит будущий кассовый разрыв и считает стоимость покрытия.</p>
             <div class="hero-actions">
-              <a class="primary-button hero-cta" href="#data">Получить Cash Gap Audit</a>
-              <a class="secondary-link hero-link" href="#product-v2">Посмотреть рабочий контур</a>
+              <a id="startWorkflowButton" class="primary-button hero-cta" href="#workflow">Начать расчет</a>
+              <span class="hero-action-hint">Первый результат после загрузки Excel</span>
             </div>
-            <p class="commercial-proof">Формат пилота: 5 рабочих дней. Данные: ДЗ, банк, платежный календарь и исходящие платежи. Результат: CFO-ready отчет по будущим разрывам и funding action plan.</p>
+            <p class="hero-trust-note"><strong>Расчет прозрачен.</strong> Суммы и даты считает детерминированная модель. AI только проверяет данные и объясняет результат.</p>
           </div>
-          <aside class="demo-case audit-memo-card" aria-label="Пример результата аудита">
-            <div class="demo-case-header">
-              <p class="eyebrow">Пример audit memo</p>
-              <h2>500 000 руб. не считаем доступными на договорную дату</h2>
+          <div class="hero-result-map hero-terminal" aria-label="Демонстрация прогноза Cash-In Risk Radar">
+            <div class="hero-live-heading">
+              <div><p class="hero-result-label">Пример прогноза</p><strong>Ликвидность · 30 дней</strong></div>
+              <span class="hero-live-status"><i></i>Данные актуальны</span>
             </div>
-            <span class="example-badge">Модельный пример ООО Ромашка</span>
-            <p class="memo-lead">Платеж не дробится по вероятности. В календарь попадает полная сумма, но на сценарную дату поступления.</p>
-            <dl class="demo-metrics">
-              <div>
-                <dt>Сумма постоплаты</dt>
-                <dd>500 000 руб.</dd>
-              </div>
-              <div>
-                <dt>Сдвиг даты P50</dt>
-                <dd>+4 дня</dd>
-              </div>
-              <div>
-                <dt>Сдвиг даты P80</dt>
-                <dd>+14 дней</dd>
-              </div>
-              <div>
-                <dt>Надежность срока</dt>
-                <dd>20%</dd>
-              </div>
-              <div>
-                <dt>Риск-окно</dt>
-                <dd>30 июня - 4 июля</dd>
-              </div>
-            </dl>
-            <div class="demo-recommendation">
-              <span>Рекомендация</span>
-              <strong>Не включать 500 000 руб. в остаток 30 июня. Проверить покрытие в риск-окне.</strong>
-              <small>Для реальных данных система показывает сумму покрытия, доступные лимиты и платежи для переноса.</small>
+            <div class="hero-terminal-alert">
+              <div><span>Поступление под риском</span><strong>500 000 руб.</strong></div>
+              <b>+4 дня</b>
             </div>
-          </aside>
-          <div class="hero-tools">
-            <button id="stressModeButton" class="icon-button" title="Переключить стресс-сценарий" aria-label="Стресс-сценарий" aria-pressed="false">
-              <span aria-hidden="true">!</span>
-            </button>
-            <button id="exportButton" class="secondary-button">CSV</button>
+            <div class="hero-liquidity-chart" aria-hidden="true">
+              <div class="hero-chart-scale"><span>1,0 млн</span><span>0</span></div>
+              <svg viewBox="0 0 560 170" preserveAspectRatio="none">
+                <line x1="0" y1="132" x2="560" y2="132" class="hero-zero-line"></line>
+                <rect x="235" y="18" width="128" height="128" class="hero-risk-zone"></rect>
+                <path d="M0 42 L82 42 L150 68 L232 68 L258 132 L362 132 L390 74 L560 74" class="hero-balance-line"></path>
+                <circle cx="258" cy="132" r="6" class="hero-risk-point"></circle>
+                <circle cx="390" cy="74" r="6" class="hero-recovery-point"></circle>
+              </svg>
+              <div class="hero-chart-dates"><span>26 июн.</span><b>30 июн.<small>план</small></b><b>4 июл.<small>ожидаем</small></b><span>10 июл.</span></div>
+            </div>
+            <div class="hero-terminal-footer">
+              <div><span>Риск-окно</span><strong>30 июн. – 4 июл.</strong></div>
+              <div><span>Действие</span><strong>Подготовить покрытие</strong></div>
+            </div>
           </div>
         </header>
 
-        <section class="section executive-memo" aria-label="Управленческий вывод Cash Gap Audit">
+        <section id="operatorBrief" class="section operator-brief" aria-labelledby="operatorBriefTitle" aria-live="polite">
+          <div class="operator-brief-heading">
+            <div><p class="eyebrow">Ежедневный обзор</p><h2 id="operatorBriefTitle">Состояние расчета</h2></div>
+            <span id="briefMode" class="operator-brief-mode">Демо</span>
+          </div>
+          <div id="operatorBriefContent"></div>
+        </section>
+
+        <section id="workflow" class="workflow-shell" aria-labelledby="workflowTitle">
+          <ol class="workflow-stepper" aria-label="Этапы расчета">
+            <li><button type="button" data-workflow-target="1" aria-current="step"><span>1</span>Загрузить данные</button></li>
+            <li><button type="button" data-workflow-target="2"><span>2</span>Проверить загрузку</button></li>
+            <li><button type="button" data-workflow-target="3"><span>3</span>Посмотреть прогноз</button></li>
+            <li><button type="button" data-workflow-target="4"><span>4</span>Выбрать покрытие</button></li>
+            <li><button type="button" data-workflow-target="5"><span>5</span>Подготовить отчет</button></li>
+          </ol>
+          <div class="workflow-current">
+            <div>
+              <span id="workflowKicker">Шаг 1 из 5</span>
+              <h2 id="workflowTitle">Загрузить данные</h2>
+              <p id="workflowDescription">Выберите Excel и проверьте дату и входящий остаток.</p>
+            </div>
+            <div class="workflow-navigation">
+              <button id="workflowPrevButton" type="button">Назад</button>
+              <button id="workflowNextButton" type="button" class="primary-button">Далее</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="section executive-memo legacy-explainer" aria-label="Управленческий вывод Cash Gap Audit" hidden>
           <div class="memo-topline">
-            <p class="eyebrow">Аудит-мемо для CFO</p>
-            <h2>Вывод → доказательство → действие</h2>
-            <p>Рабочая консоль показывает расчет, а memo-слой переводит его в управленческое решение для CFO: какую сумму не считать доступной, где риск-окно и чем закрывать разрыв.</p>
+            <p class="eyebrow">Для CFO</p>
+            <h2>Вывод · причина · действие</h2>
           </div>
           <div class="memo-proof-grid">
             <article>
               <span>Вывод</span>
               <strong>Плановая дата не равна дате денег</strong>
-              <p>30 июня сумма видна как договорный план, но не увеличивает исходящий остаток.</p>
             </article>
             <article>
               <span>Доказательство</span>
               <strong>История оплат: 0 / 1 / 4 / 14 / 30 дней</strong>
-              <p>P50 переносит cash-in на 4 июля, P80 — на 14 июля.</p>
             </article>
             <article>
               <span>Действие</span>
               <strong>Планировать покрытие до сценарной даты</strong>
-              <p>Если в риск-окне есть списания, нужна сумма покрытия или перенос платежей.</p>
             </article>
           </div>
         </section>
 
-        <section id="product-v2" class="section product-v2-section" aria-label="Операционный контур Cash-In Risk Radar">
+        <section id="product-v2" class="section product-v2-section legacy-explainer" aria-label="Операционный контур Cash-In Risk Radar" hidden>
           <div class="panel-header">
             <div>
-              <p class="eyebrow">Рабочий контур казначейства</p>
-              <h2>После audit memo пользователь попадает в операционную консоль</h2>
-              <p class="section-subtitle">Это слой решений поверх 1C, ERP, банка, CRM и Excel: финансист видит статус данных, сверку, сценарный календарь и список действий по покрытию разрыва.</p>
+              <p class="eyebrow">Казначейство</p>
+              <h2>Рабочий контур</h2>
             </div>
           </div>
           <div class="ops-console-preview" aria-label="Превью операционной консоли">
@@ -135,7 +132,6 @@
                 <li>Разрыв найден</li>
                 <li>Действия выбраны</li>
               </ol>
-              <small>Схема процесса, не меню</small>
             </aside>
             <div class="ops-preview-workspace">
               <div class="ops-preview-header">
@@ -182,108 +178,33 @@
               </div>
             </div>
           </div>
-          <div class="v2-module-grid">
-            <article>
-              <span>01</span>
-              <strong>Прием данных</strong>
-              <p>Финансист загружает выгрузки или подключает источник. Система показывает, чего не хватает для расчета.</p>
-            </article>
-            <article>
-              <span>02</span>
-              <strong>Сверка</strong>
-              <p>Банк сопоставляется со счетами и актами. Неясные платежи попадают в очередь ручной проверки.</p>
-            </article>
-            <article>
-              <span>03</span>
-              <strong>Сценарный прогноз</strong>
-              <p>P50/P80/P90/Stress двигают полную сумму на реалистичную дату поступления.</p>
-            </article>
-            <article>
-              <span>04</span>
-              <strong>Действия</strong>
-              <p>Разрыв переводится в конкретный список действий с суммой, сроком, стоимостью и риском.</p>
-            </article>
-          </div>
         </section>
 
-        <section class="section value-section" aria-label="Ценность Cash Gap Audit">
-          <div class="value-card-grid">
-            <article class="value-card">
-              <strong>Какие деньги не придут</strong>
-              <p>Находим рискованные поступления по истории оплат, просрочкам, документам и банковскому матчингу.</p>
-            </article>
-            <article class="value-card">
-              <strong>Когда будет разрыв</strong>
-              <p>Строим сценарный календарь cash-in и показываем дату минимального остатка.</p>
-            </article>
-            <article class="value-card">
-              <strong>Сколько нужно закрыть</strong>
-              <p>Считаем сумму и срок потребности в ликвидности по P50 / P80 / P90 / стресс-сценарию.</p>
-            </article>
-            <article class="value-card">
-              <strong>Что делать</strong>
-              <p>Сравниваем резерв, факторинг, овердрафт, кредитную линию и перенос платежей.</p>
-            </article>
-          </div>
-        </section>
-
-        <section id="ai-trust" class="section ai-trust-section">
-          <div class="panel trust-panel">
-            <div class="panel-header">
-              <div>
-                <p class="eyebrow">AI-native, но audit-safe</p>
-                <h2>Где используется LLM, а где только расчет</h2>
-                <p class="section-subtitle">Для seed-демо важно показать не "чат ради чата", а безопасную границу: LLM ускоряет работу финансиста, но не выдумывает цифры.</p>
-              </div>
-            </div>
+        <section id="ai-trust" class="section panel compact-disclosure-section legacy-explainer" hidden>
+          <details class="progressive-disclosure">
+            <summary>
+              <span><b>AI объясняет, движок считает</b><small>Граница LLM и финансового расчета</small></span>
+            </summary>
             <div class="trust-grid">
-              <article>
-                <span>LLM можно</span>
-                <strong>Понять данные</strong>
-                <p>Распознать колонки выгрузки, подсказать ошибки, объяснить отсутствующие поля и предложить маппинг.</p>
-              </article>
-              <article>
-                <span>LLM можно</span>
-                <strong>Объяснить прогноз</strong>
-                <p>Собрать CFO memo: какие платежи сдвинулись, почему, какие источники подтверждают риск.</p>
-              </article>
-              <article>
-                <span>Только расчет</span>
-                <strong>Посчитать деньги</strong>
-                <p>Сценарные даты, остатки, cash gap, funding need и лимиты считаются детерминированным движком.</p>
-              </article>
-              <article>
-                <span>Только с источниками</span>
-                <strong>Ask Radar</strong>
-                <p>Ответы на вопросы казначея должны ссылаться на строки данных, формулы и сценарные предположения.</p>
-              </article>
+              <article><span>LLM</span><strong>Проверяет данные</strong><p>Маппинг и объяснение ошибок.</p></article>
+              <article><span>LLM</span><strong>Готовит memo</strong><p>Выводы со ссылками на источники.</p></article>
+              <article><span>Расчет</span><strong>Считает деньги</strong><p>Даты, остатки и разрыв.</p></article>
+              <article><span>Контроль</span><strong>Не выдумывает цифры</strong><p>Ответы только по данным расчета.</p></article>
             </div>
-          </div>
-          <aside class="panel ask-radar-card">
-            <p class="eyebrow">Превью Ask Radar</p>
-            <h2>Вопрос финансиста</h2>
-            <div class="ask-message user-message">Почему 500 000 руб. ООО Ромашка не стоят в деньгах 30 июня?</div>
-            <div class="ask-message assistant-message">
-              <strong>Ответ с доказательствами</strong>
-              <p>По истории 5 аналогичных договоров только 1 платеж пришел в срок. P50-сдвиг = +4 дня, поэтому полные 500 000 руб. попадают в календарь 4 июля.</p>
-              <small>Источники: договор ROM-POSTPAY-001, история задержек 0;1;4;14;30, формула сценарной даты.</small>
-            </div>
-          </aside>
+          </details>
         </section>
 
-        <section class="section risk-reasons">
+        <section class="section risk-reasons legacy-explainer" hidden>
           <div class="panel-header">
             <div>
-              <p class="eyebrow">Причина → сумма → действие</p>
+              <p class="eyebrow">Причина · сумма · действие</p>
               <h2>Почему возникнет разрыв</h2>
-              <p class="section-subtitle">Не просто показываем сумму, а раскладываем риск по договору, истории оплат и доступным действиям.</p>
             </div>
           </div>
           <div class="reason-grid">
             <article class="reason-card">
               <span>Вывод</span>
               <strong>ООО Ромашка</strong>
-              <p>По пяти прошлым идентичным договорам только один платеж пришел в срок.</p>
               <dl>
                 <dt>Доказательство</dt>
                 <dd>История: 0 / +1 / +4 / +14 / +30 дней</dd>
@@ -296,7 +217,6 @@
             <article class="reason-card">
               <span>Доказательство</span>
               <strong>Ожидаемая дата</strong>
-              <p>Историческая средняя задержка: 4 дня после договорного срока.</p>
               <dl>
                 <dt>Сдвиг</dt>
                 <dd>30 июн. → 04 июл.</dd>
@@ -307,7 +227,6 @@
             <article class="reason-card">
               <span>Действие</span>
               <strong>Источники покрытия</strong>
-              <p>У модельной компании нет овердрафта, кредитной линии, факторинга и резерва.</p>
               <dl>
                 <dt>Доступно</dt>
                 <dd>0 руб.</dd>
@@ -318,15 +237,10 @@
           </div>
         </section>
 
-        <section class="section model-logic">
-          <div class="panel-header">
-            <div>
-              <p class="eyebrow">Модельный расчет ООО Ромашка</p>
-              <h2>Как считается ООО Ромашка</h2>
-              <p class="section-subtitle">Один договор, один входящий платеж, пять исторических оплат. Никаких овердрафтов, кредитных линий, факторинга и резервов в модели нет.</p>
-            </div>
-          </div>
-          <div class="model-grid">
+        <section class="section panel model-logic compact-disclosure-section workflow-stage workflow-stage-3">
+          <details class="progressive-disclosure">
+            <summary><span><b>Демо: ООО Ромашка</b><small>Посмотреть пример расчета</small></span></summary>
+            <div class="model-grid">
             <article class="model-card">
               <span>1. Договор</span>
               <strong>1 000 000 руб. × 50%</strong>
@@ -357,31 +271,35 @@
               <strong>30 июн. + 4 дня</strong>
               <p>В P50 полные <b>500 000 руб.</b> попадают на <b>04 июл.</b>, а не на плановую дату.</p>
             </article>
-          </div>
+            </div>
+          </details>
         </section>
 
-        <section id="dashboard" class="section hero-band">
+        <section id="dashboard" class="section hero-band workflow-stage workflow-stage-3">
           <div class="hero-copy">
-            <p class="eyebrow">Ключевая формулировка</p>
-            <h2>Платежный календарь превращается из план-факта по датам в риск-корректированный прогноз ликвидности.</h2>
-            <p class="section-subtitle">Вероятность нужна не для уменьшения суммы платежа, а для выбора даты, на которую безопаснее поставить полный cash-in в календарь.</p>
+            <p class="eyebrow">Результат</p>
+            <h2>Прогноз ликвидности</h2>
           </div>
           <div class="metric-grid" id="metricGrid"></div>
         </section>
 
-        <section class="section forecast-layout">
+        <section class="section forecast-layout workflow-stage workflow-stage-3">
           <div class="panel wide-panel">
             <div class="panel-header">
               <div>
-                <p class="eyebrow">Сценарный горизонт</p>
-                <h2>P50 / P80 / P90 сценарии реального cash-in</h2>
+                <p class="eyebrow">30 дней</p>
+                <h2>Когда ждать поступления</h2>
+                <p class="scenario-help">P50 — обычный срок · P80 — срок с запасом · P90 — консервативный срок</p>
               </div>
               <div class="segmented" role="tablist" aria-label="Сценарии прогноза">
-                <button class="active" data-scenario="p50">P50</button>
-                <button data-scenario="p80">P80</button>
-                <button data-scenario="p90">P90</button>
+                <button class="active" data-scenario="p50">Базовый · P50</button>
+                <button data-scenario="p80">С запасом · P80</button>
+                <button data-scenario="p90">Консервативный · P90</button>
                 <button data-scenario="stress">Стресс</button>
               </div>
+              <button id="stressModeButton" class="icon-button" title="Переключить стресс-сценарий" aria-label="Стресс-сценарий" aria-pressed="false">
+                <span aria-hidden="true">!</span>
+              </button>
             </div>
             <div class="chart-wrap">
               <svg id="forecastChart" viewBox="0 0 920 320" role="img" aria-label="График прогноза ликвидности"></svg>
@@ -395,16 +313,18 @@
               </div>
             </div>
             <div id="gapWarning" class="gap-warning"></div>
-            <p class="scenario-card-note">Ниже не переключатели. Это расчетное сравнение минимального остатка по каждому сценарию. Переключатель сценария находится над графиком.</p>
             <div id="scenarioCards" class="scenario-cards"></div>
           </div>
         </section>
 
-        <section id="calendar" class="section panel primary-artifact">
+        <section id="calendar" class="section panel primary-artifact workflow-stage workflow-stage-3">
+          <details class="calculation-details">
+            <summary><span><b>Платежный календарь</b><small>Показать ежедневный расчет за 30 дней</small></span></summary>
+            <div class="calculation-details-body">
           <div class="panel-header">
             <div>
-              <p class="eyebrow">Главный расчетный артефакт</p>
-              <h2>Сценарный платежный календарь реального cash-in</h2>
+              <p class="eyebrow">Расчет</p>
+              <h2>Платежный календарь</h2>
             </div>
             <div class="legend">
               <span><i class="dot planned"></i>План</span>
@@ -412,13 +332,14 @@
               <span><i class="dot outflow"></i>Обязательные платежи</span>
             </div>
           </div>
-          <div class="calculation-note">
-            <strong>Что смотреть первым:</strong>
-            <span>Календарь показывает, в какой день деньги реально попадают в остаток и где появляется потребность покрытия.</span>
-            <strong>Формула строки:</strong>
-            <span>Исходящий остаток = входящий остаток + сценарные реальные поступления - списания.</span>
-            <span>Плановые входящие показаны справочно по договорной дате. В деньги они попадают полной суммой на сценарную дату оплаты.</span>
-          </div>
+          <details class="inline-disclosure">
+            <summary>Как читать календарь</summary>
+            <div class="calculation-note">
+              <span>Исходящий остаток = входящий + сценарные поступления − списания.</span>
+              <span>План показан справочно; полная сумма входит в деньги на сценарную дату.</span>
+              <span id="forecastScope">Горизонт будет показан после расчета.</span>
+            </div>
+          </details>
           <div class="table-wrap">
             <table>
               <thead>
@@ -436,22 +357,28 @@
               <tbody id="calendarRows"></tbody>
             </table>
           </div>
+            </div>
+          </details>
         </section>
 
-        <section id="receipts" class="section split">
+        <section id="receipts" class="section split workflow-stage workflow-stage-3">
           <div class="panel">
+            <details class="calculation-details">
+              <summary><span><b>Сценарные даты поступлений</b><small>Плановая и ожидаемая дата по каждой ДЗ</small></span></summary>
+              <div class="calculation-details-body">
             <div class="panel-header">
               <div>
-                <p class="eyebrow">Топ-20</p>
-                <h2>Поступления со сдвигом сценарной даты</h2>
+                <p class="eyebrow">ДЗ</p>
+                <h2>Сценарные даты поступлений</h2>
               </div>
             </div>
-            <div class="calculation-note">
-              <strong>Как читать таблицу:</strong>
-              <span>Вероятность описывает надежность оплаты в срок, а не дробит сумму платежа.</span>
-              <span>Ожидание = сценарная дата оплаты. Риск = часть долга, которую нельзя считать надежным cash-in на плановую дату.</span>
-              <span>Сдвиг даты берется из истории задержек в Excel: колонка "История задержек, дней". Если истории нет, используется fallback по средней задержке, документам и матчингу с банком. Новый контрагент без истории считается в срок, но помечается как "нет истории".</span>
-            </div>
+            <details class="inline-disclosure">
+              <summary>Как рассчитаны даты</summary>
+              <div class="calculation-note">
+                <span>Вероятность меняет дату, а не сумму.</span>
+                <span>При короткой истории используется портфельная статистика.</span>
+              </div>
+            </details>
             <div class="table-wrap">
               <table>
                 <thead>
@@ -459,93 +386,167 @@
                     <th>Контрагент</th>
                     <th>Сумма</th>
                     <th>Плановая дата</th>
-                    <th>P50 дата</th>
-                    <th>P80 дата</th>
-                    <th>Сдвиг P50 / P80<br><small>источник расчета</small></th>
-                    <th>Риск-окно</th>
-                    <th>Причина сдвига</th>
+                    <th id="selectedScenarioDateHeading">Ожидаемая дата</th>
+                    <th>Относительно плана</th>
+                    <th>Почему такая дата</th>
                   </tr>
                 </thead>
                 <tbody id="receiptRows"></tbody>
               </table>
             </div>
+              </div>
+            </details>
           </div>
 
-          <div class="panel">
-            <div class="panel-header">
-              <div>
-                <p class="eyebrow">Логика риска</p>
-                <h2>Факторы расчета</h2>
-              </div>
-            </div>
-            <div id="riskFactors" class="factor-list"></div>
+          <div class="panel compact-disclosure-section">
+            <details class="progressive-disclosure">
+              <summary><span><b>Факторы расчета</b><small>История, документы и банк</small></span></summary>
+              <div id="riskFactors" class="factor-list"></div>
+            </details>
           </div>
         </section>
 
-        <section id="debtors" class="section panel">
+        <section id="debtors" class="section panel workflow-stage workflow-stage-3">
+          <details class="calculation-details">
+            <summary><span><b>Контрагенты</b><small>Показать историю и сдвиги по дебиторам</small></span></summary>
+            <div class="calculation-details-body">
           <div class="panel-header">
             <div>
-              <p class="eyebrow">Дисциплина оплат</p>
-              <h2>Контрагенты, сдвигающие cash-in позже договора</h2>
+              <p class="eyebrow">Контрагенты</p>
+              <h2>Кто задерживает cash-in</h2>
             </div>
           </div>
           <div id="debtorCards" class="debtor-grid"></div>
+            </div>
+          </details>
         </section>
 
-        <section id="actions" class="section panel">
+        <section id="actions" class="section panel workflow-stage workflow-stage-4">
           <div class="panel-header">
             <div>
-              <p class="eyebrow">Действия с ликвидностью</p>
-              <h2>Расчетные рекомендации</h2>
+              <p class="eyebrow">Ликвидность</p>
+              <h2>План покрытия</h2>
             </div>
           </div>
-          <div class="calculation-note">
-            <strong>Формула потребности:</strong>
-            <span>Потребность финансирования = MAX(0; -минимальный исходящий остаток за 30 дней).</span>
-            <span>Суммы по овердрафту, факторингу, кредитной линии и резерву ограничены доступными лимитами из блока данных.</span>
-          </div>
+          <details class="inline-disclosure">
+            <summary>Как рассчитано покрытие</summary>
+            <div class="calculation-note"><span>Потребность = MAX(0; −минимальный остаток). После каждого действия календарь пересчитывается.</span></div>
+          </details>
           <div class="action-memo">
             <span>Рекомендация аудита</span>
-            <strong>Если в риск-окне появляется отрицательный остаток, сначала закрываем сумму разрыва доступными лимитами, затем переносим некритичные платежи.</strong>
+            <strong>Резерв → перенос → факторинг → овердрафт → кредитная линия.</strong>
           </div>
+          <details class="calculation-details funding-result-details">
+            <summary><span><b>Результат по источникам</b><small>Сумма, стоимость и остаток разрыва</small></span></summary>
+            <div class="calculation-details-body">
           <div class="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>Вариант</th>
-                  <th>Сумма</th>
-                  <th>Срок</th>
-                  <th>Стоимость</th>
-                  <th>Скорость</th>
-                  <th>Риск</th>
-                  <th>Рекомендация</th>
+                  <th>Источник</th>
+                  <th>Применено</th>
+                  <th>Дата / срок</th>
+                  <th>Стоимость / формула</th>
+                  <th>Использовано / лимит</th>
+                  <th>Ограничения</th>
+                  <th>Статус / остаток</th>
                 </tr>
               </thead>
               <tbody id="actionRows"></tbody>
             </table>
           </div>
+            </div>
+          </details>
         </section>
 
-        <section id="data" class="section data-layout">
-          <div class="panel">
-            <div class="panel-header compact">
-              <div>
-                <p class="eyebrow">Что нужно от клиента</p>
-                <h2>Что нужно для аудита</h2>
-              </div>
-            </div>
-            <div id="intakeList" class="check-list"></div>
+        <section id="data" class="section data-layout workflow-stage workflow-stage-data">
+          <div class="panel workflow-part workflow-part-intake-help">
+            <details class="progressive-disclosure">
+              <summary><span><b>Что нужно для аудита</b><small>Состав исходных данных</small></span></summary>
+              <div id="intakeList" class="check-list"></div>
+            </details>
           </div>
-          <div class="panel">
-            <div class="panel-header compact">
+          <div class="panel workflow-data-panel">
+            <div class="panel-header compact workflow-part workflow-part-intake">
               <div>
-                <p class="eyebrow">Данные пилота</p>
-                <h2>Данные для Cash Gap Audit</h2>
+                <p class="eyebrow">Шаг 1</p>
+                <h2>Загрузить данные</h2>
               </div>
             </div>
-            <p class="data-note">На пилоте работаем с выгрузками из 1С/ERP/банка. Excel — временный формат передачи данных, интеграции на первом этапе не нужны. Этот блок становится входом в прием данных: источник, качество данных, маппинг и проверка полноты.</p>
-            <details class="excel-dictionary" open>
-              <summary>Как заполнять расчетные поля Excel</summary>
+            <p class="data-note workflow-part workflow-part-intake">Один файл: поступления, обязательные платежи и стартовый остаток.</p>
+            <div class="run-control" aria-live="polite">
+              <div class="run-control-status">
+                <span id="runStatusBadge" class="run-status-badge" data-tone="neutral">Данные не рассчитаны</span>
+                <strong>Расчетный запуск</strong>
+                <small id="runStatusDetail">Подготовьте данные и выполните расчет.</small>
+              </div>
+              <div class="run-control-actions">
+                <button id="calculateRunButton" class="primary-button workflow-action workflow-action-calculate">Рассчитать прогноз</button>
+                <button id="downloadSnapshotButton" class="workflow-action workflow-action-report" disabled>Скачать файл расчета</button>
+                <button id="exportButton" class="workflow-action workflow-action-report">Скачать CSV для CFO</button>
+                <button id="uploadSnapshotButton" class="workflow-action workflow-action-intake">Загрузить сохраненный расчет</button>
+                <input id="snapshotInput" class="visually-hidden" type="file" accept=".json,application/json" aria-label="Файл расчета в формате JSON для восстановления" />
+              </div>
+              <p id="calculationFeedback" class="calculation-feedback" role="status" tabindex="-1" hidden></p>
+              <p class="calculation-file-note workflow-part workflow-part-report"><strong>Файл расчета (.json)</strong> хранит данные, результат и подтверждения. Нужен для сравнения и восстановления.</p>
+            </div>
+            <div class="audit-closeout-grid">
+              <section class="closeout-card workflow-part workflow-part-quality" aria-labelledby="comparisonTitle">
+                <div class="closeout-heading">
+                  <div>
+                    <p class="eyebrow">Необязательно</p>
+                    <h3 id="comparisonTitle">Сравнить с прошлой неделей</h3>
+                  </div>
+                  <button id="uploadPriorSnapshotButton">Загрузить предыдущий расчет</button>
+                  <input id="priorSnapshotInput" class="visually-hidden" type="file" accept=".json,application/json" aria-label="Файл предыдущего расчета в формате JSON для сравнения" />
+                </div>
+                <div class="prior-ledger-choice">
+                  <button id="applyPriorLedgerButton" type="button" disabled>Использовать данные прошлого расчета для обновления банка</button>
+                  <small id="priorLedgerStatus">Доступно для файла с сохраненными ДЗ, операциями и остатками. Затем загрузите Bank + BankBalances.</small>
+                </div>
+                <div id="comparisonContent" class="comparison-content" aria-live="polite">
+                  <p class="empty-state">Предыдущий расчет не загружен. Здесь появится сравнение с текущим расчетом.</p>
+                </div>
+                <div id="priorFundingPanel" class="prior-funding-panel" hidden>
+                  <strong>Коммерческие условия прошлого расчета</strong>
+                  <span id="priorFundingSummary"></span>
+                  <button id="applyPriorFundingButton" type="button">Использовать условия финансирования прошлого расчета</button>
+                  <small>Будут перенесены только лимиты, даты, сроки, ставки и комиссии. Результаты и использованные суммы будут рассчитаны заново.</small>
+                </div>
+              </section>
+              <section class="closeout-card workflow-part workflow-part-report" aria-labelledby="signOffTitle">
+                <div class="closeout-heading">
+                  <div>
+                    <p class="eyebrow">Контроль перед отчетом</p>
+                    <h3 id="signOffTitle">Подтверждение расчета</h3>
+                  </div>
+                </div>
+                <label class="operator-field">
+                  <span>Имя или роль оператора</span>
+                  <input id="signOffOperatorInput" type="text" maxlength="120" placeholder="Например: казначей" autocomplete="off" />
+                </label>
+                <div id="reconciliationCounters" class="reconciliation-counters" aria-live="polite"></div>
+                <div id="cfoReadinessSummary" class="cfo-readiness-summary" aria-live="polite"></div>
+                <label id="uncoveredGapAcceptanceLabel" class="uncovered-acceptance" hidden>
+                  <input id="uncoveredGapAcceptanceInput" type="checkbox" />
+                  <span>Непокрытый кассовый разрыв проверен и принят в отчет CFO</span>
+                </label>
+                <div class="signoff-statuses">
+                  <div>
+                    <span id="reconciliationSignOffBadge" class="signoff-badge pending">Сверка не подтверждена</span>
+                    <small id="reconciliationSignOffDetail">Доступно после успешного расчета.</small>
+                    <button id="confirmReconciliationButton">Подтвердить сверку</button>
+                  </div>
+                  <div>
+                    <span id="cfoSignOffBadge" class="signoff-badge pending">Отчет CFO не подготовлен</span>
+                    <small id="cfoSignOffDetail">Сначала подтвердите сверку.</small>
+                    <button id="confirmCfoButton">Отметить отчет CFO подготовленным</button>
+                  </div>
+                </div>
+              </section>
+            </div>
+            <details class="excel-dictionary workflow-part workflow-part-intake">
+              <summary>Справочник полей Excel</summary>
               <div class="excel-dictionary-grid">
                 <article>
                   <strong>История задержек, дней</strong>
@@ -565,18 +566,19 @@
                 </article>
                 <article>
                   <strong>Новый контрагент</strong>
-                  <span>Если истории и средней задержки нет, MVP ставит платеж в срок с вероятностью даты 100%, но помечает расчет как "нет истории".</span>
+                  <span>Если собственной истории нет, сценарные даты используют портфельный prior. Платеж помечается как «нет собственной истории» и не получает искусственную надежность 100%.</span>
                 </article>
               </div>
             </details>
-            <div class="upload-zone">
-              <input id="excelInput" type="file" accept=".xlsx" aria-label="Excel-файл исходных данных" />
+            <div class="upload-zone workflow-part workflow-part-intake">
+              <input id="excelInput" class="visually-hidden" type="file" accept=".xlsx" aria-label="Excel-файл исходных данных" />
+              <label class="file-picker-button" for="excelInput">Выбрать Excel</label>
               <div>
-                <strong>Выгрузка .xlsx: поступления, исходящие платежи и стартовый остаток</strong>
-                <span id="uploadStatus">Используются демо-данные. Можно загрузить типовой Excel и пересчитать модель.</span>
+                <strong id="selectedFileName">Добавьте Excel для расчета</strong>
+                <span id="uploadStatus">Поступления, обязательные платежи и стартовый остаток.</span>
               </div>
             </div>
-            <div class="balance-controls">
+            <div class="balance-controls workflow-part workflow-part-intake">
               <label>
                 <span>Стартовая дата</span>
                 <input id="startDateInput" type="date" />
@@ -587,43 +589,81 @@
               </label>
               <small id="openingBalanceSource">Источник: демо-значение, можно изменить вручную.</small>
             </div>
-            <div class="funding-controls" aria-label="Доступные источники финансирования">
-              <div>
+            <div class="funding-controls workflow-part workflow-part-funding" aria-label="Доступные источники финансирования">
+              <div class="funding-heading">
                 <h3>Доступные источники финансирования</h3>
-                <p>Заполните доступные остатки лимитов. Эти значения ограничивают суммы в блоке расчетных рекомендаций.</p>
+                <p>Заполняйте только подтвержденные условия.</p>
               </div>
-              <label>
-                <span>Овердрафт, доступный лимит</span>
-                <input id="overdraftLimitInput" type="number" min="0" step="100000" value="20000000" />
-              </label>
-              <label>
-                <span>Факторинг, доступный лимит</span>
-                <input id="factoringLimitInput" type="number" min="0" step="100000" value="15000000" />
-              </label>
-              <label>
-                <span>Кредитная линия, доступный лимит</span>
-                <input id="creditLineLimitInput" type="number" min="0" step="100000" value="40000000" />
-              </label>
-              <label>
-                <span>Резерв ликвидности</span>
-                <input id="liquidityReserveInput" type="number" min="0" step="100000" value="25000000" />
-              </label>
+              <details class="funding-source">
+                <summary><strong>1. Резерв ликвидности</strong><span>сначала</span></summary>
+                <div class="funding-input-grid">
+                  <label><span>Доступный резерв, руб.</span><input id="liquidityReserveInput" type="number" min="0" step="100000" value="0" /></label>
+                  <label><span>Доступен с даты</span><input id="reserveAvailableDateInput" type="date" /></label>
+                  <label><span>Подготовка, дней</span><input id="reserveLeadDaysInput" type="number" min="0" step="1" value="0" /></label>
+                  <label><span>Срок использования, дней</span><input id="reserveTermDaysInput" type="number" min="0" step="1" /></label>
+                  <label><span>Стоимость капитала, % годовых</span><input id="reserveRatePctInput" type="number" min="0" step="0.01" /></label>
+                  <label><span>Минимальная сумма, руб.</span><input id="reserveMinDrawInput" type="number" min="0" step="100000" value="0" /></label>
+                </div>
+              </details>
+              <details class="funding-source">
+                <summary><strong>2. Перенос некритичных платежей</strong><span>после резерва</span></summary>
+                <div class="funding-input-grid">
+                  <label><span>Допустимый перенос, дней</span><input id="paymentMoveDaysInput" type="number" min="0" step="1" /></label>
+                  <label><span>Фиксированная стоимость, руб.</span><input id="paymentMoveCostInput" type="number" min="0" step="1000" /></label>
+                </div>
+              </details>
+              <details class="funding-source">
+                <summary><strong>3. Факторинг</strong><span>только подходящая ДЗ</span></summary>
+                <div class="funding-input-grid">
+                  <label><span>Доступный лимит, руб.</span><input id="factoringLimitInput" type="number" min="0" step="100000" value="0" /></label>
+                  <label><span>Доступен с даты</span><input id="factoringAvailableDateInput" type="date" /></label>
+                  <label><span>Подготовка, дней</span><input id="factoringLeadDaysInput" type="number" min="0" step="1" /></label>
+                  <label><span>Срок, дней</span><input id="factoringTermDaysInput" type="number" min="0" step="1" /></label>
+                  <label><span>Комиссия, % от суммы</span><input id="factoringFeePctInput" type="number" min="0" step="0.01" /></label>
+                  <label><span>Минимальная сумма, руб.</span><input id="factoringMinDrawInput" type="number" min="0" step="100000" value="0" /></label>
+                </div>
+              </details>
+              <details class="funding-source">
+                <summary><strong>4. Овердрафт</strong><span>после факторинга</span></summary>
+                <div class="funding-input-grid">
+                  <label><span>Доступный лимит, руб.</span><input id="overdraftLimitInput" type="number" min="0" step="100000" value="0" /></label>
+                  <label><span>Доступен с даты</span><input id="overdraftAvailableDateInput" type="date" /></label>
+                  <label><span>Подготовка, дней</span><input id="overdraftLeadDaysInput" type="number" min="0" step="1" /></label>
+                  <label><span>Срок использования, дней</span><input id="overdraftTermDaysInput" type="number" min="0" step="1" /></label>
+                  <label><span>Ставка, % годовых</span><input id="overdraftRatePctInput" type="number" min="0" step="0.01" /></label>
+                  <label><span>Минимальная сумма, руб.</span><input id="overdraftMinDrawInput" type="number" min="0" step="100000" value="0" /></label>
+                </div>
+              </details>
+              <details class="funding-source">
+                <summary><strong>5. Кредитная линия</strong><span>последний внешний источник</span></summary>
+                <div class="funding-input-grid">
+                  <label><span>Доступный лимит, руб.</span><input id="creditLineLimitInput" type="number" min="0" step="100000" value="0" /></label>
+                  <label><span>Доступна с даты</span><input id="creditLineAvailableDateInput" type="date" /></label>
+                  <label><span>Подготовка, дней</span><input id="creditLineLeadDaysInput" type="number" min="0" step="1" /></label>
+                  <label><span>Срок использования, дней</span><input id="creditLineTermDaysInput" type="number" min="0" step="1" /></label>
+                  <label><span>Ставка, % годовых</span><input id="creditLineRatePctInput" type="number" min="0" step="0.01" /></label>
+                  <label><span>Минимальная сумма, руб.</span><input id="creditLineMinDrawInput" type="number" min="0" step="100000" value="0" /></label>
+                </div>
+              </details>
             </div>
-            <div id="importReport" class="import-report" aria-live="polite"></div>
-            <div class="csv-actions">
+            <div id="qualitySummary" class="reconciliation-counters workflow-part workflow-part-quality" aria-live="polite"></div>
+            <div class="quality-report-wrapper workflow-part workflow-part-quality">
+              <div id="importReport" class="import-report" aria-live="polite"></div>
+            </div>
+            <div class="csv-actions workflow-part workflow-part-intake">
               <a
                 class="secondary-link"
-                href="https://raw.githubusercontent.com/nikv98402-commits/cash-in-risk-radar-demo/main/templates/cash_in_risk_audit_upload_template.xlsx"
+                href="templates/cash_in_risk_audit_upload_template.xlsx"
                 download="cash_in_risk_audit_upload_template.xlsx"
               >Скачать Excel-шаблон</a>
               <button id="loadSampleButton">Вернуть демо</button>
-              <button id="parseExcelButton" class="primary-button">Загрузить и пересчитать</button>
             </div>
           </div>
         </section>
       </main>
     </div>
 
-    <script src="app.js?v=qa-model-sheet-1"></script>
+    <script src="vendor/xlsx/0.20.3/xlsx.full.min.js?v=0.20.3"></script>
+    <script type="module" src="app.js?v=workflow-audit-2"></script>
   </body>
 </html>
