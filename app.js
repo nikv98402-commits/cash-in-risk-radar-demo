@@ -2,6 +2,8 @@ import { clamp, daysBetween, formatDateInput } from "./src/domain/date.js";
 import { buildForecast as buildForecastDomain } from "./src/domain/forecast.js";
 import { simulateFundingCoverage } from "./src/domain/funding.js";
 import { compareAuditRuns } from "./src/domain/comparison.js";
+import { applyBankUpdateToPriorLedger, canonicalLedgerForRun } from "./src/domain/daily-ledger.js";
+import { buildOperatorBrief } from "./src/domain/operator-brief.js";
 import { AuditRunController, MODEL_VERSIONS, RUN_STATUS, SIGN_OFF_STATUS, getCfoReadiness } from "./src/domain/run.js";
 import { scoreReceipt as scoreReceiptDomain } from "./src/domain/timing-model.js";
 import { normalizeDate, parseOutflows, parseReceipts } from "./src/io/schema.js";
@@ -79,6 +81,7 @@ const state = {
   funding: createFundingState(),
   receipts: [],
   outflows: [],
+  canonicalLedger: null,
   dataSources: [{ type: "demo", name: "Модель ООО Ромашка" }],
   importReport: {
     errors: [],
@@ -89,6 +92,7 @@ const state = {
 
 const runController = new AuditRunController();
 let priorSnapshot = null;
+let selectedPriorLedger = null;
 let fundingProvenance = { inputSource: "Ручной ввод в интерфейсе", sourceRunId: null, sourceCreatedAt: null, sourceAsOfDate: null };
 
 const scenarioLabels = {
@@ -136,6 +140,7 @@ function loadDemo() {
   fundingProvenance = { inputSource: "Ручной ввод в интерфейсе", sourceRunId: null, sourceCreatedAt: null, sourceAsOfDate: null };
   state.receipts = parseReceipts(demoReceipts, forecastStartDate);
   state.outflows = parseOutflows(demoOutflows, forecastStartDate);
+  state.canonicalLedger = null;
   state.dataSources = [{ type: "demo", name: "Модель ООО Ромашка" }];
   syncBalanceControls("Модель ООО Ромашка: стартовый остаток 500 000 руб., дата старта 30 июня 2026.");
   syncFundingControls();
@@ -144,8 +149,8 @@ function loadDemo() {
     excelInput.value = "";
   }
   const fileName = document.querySelector("#selectedFileName");
-  if (fileName) fileName.textContent = "Файл не выбран";
-  setUploadStatus("Нужны поступления, исходящие платежи и стартовый остаток.", "neutral");
+  if (fileName) fileName.textContent = "Добавьте Excel для расчета";
+  setUploadStatus("Поступления, обязательные платежи и стартовый остаток.", "neutral");
   resetImportReport("Демо-пример: июнь 2026. Для реального аудита загрузите выгрузку или задайте дату и остаток вручную.");
 }
 
@@ -330,17 +335,19 @@ function fundingSourceToRunInput(source) {
   ]));
 }
 
-function buildRunInputs({ receipts, outflows, asOfDate, openingBalance, funding, scenario }) {
-  return {
+function buildRunInputs({ receipts, outflows, asOfDate, openingBalance, funding, scenario, canonicalLedger }) {
+  const inputs = {
     asOfDate: dateOnly(asOfDate),
     scenario,
     horizonDays: 30,
     currency: "RUB",
-    openingBalanceMinor: rublesToMinor(openingBalance),
+    openingBalanceMinor: canonicalLedger?.openingBalanceMinor ?? rublesToMinor(openingBalance),
     receipts: receipts.map(receiptToRunInput),
     outflows: outflows.map(outflowToRunInput),
     fundingSources: fundingSources(funding, asOfDate).map(fundingSourceToRunInput)
   };
+  if (canonicalLedger) inputs.canonicalLedger = canonicalLedger;
+  return inputs;
 }
 
 function hydrateRunInputs(inputs) {
@@ -500,12 +507,13 @@ function currentCandidate(sourceOverride = null) {
   return {
     receipts: staged?.receipts ?? state.receipts,
     outflows: staged?.outflows ?? state.outflows,
-    asOfDate: forecastStartDate,
-    openingBalance: state.openingBalance,
+    asOfDate: staged?.asOfDate ?? forecastStartDate,
+    openingBalance: staged?.openingBalance ?? state.openingBalance,
     funding: state.funding,
     scenario: state.scenario,
     dataSources: staged?.dataSources ?? state.dataSources,
-    qualityReport: staged?.qualityReport ?? state.importReport
+    qualityReport: staged?.qualityReport ?? state.importReport,
+    canonicalLedger: staged && Object.hasOwn(staged, "canonicalLedger") ? staged.canonicalLedger : state.canonicalLedger
   };
 }
 
@@ -517,6 +525,7 @@ function applyCommittedInputs(inputs, dataSources, qualityReport) {
   state.openingBalance = hydrated.openingBalanceMinor / 100;
   state.receipts = hydrated.receipts;
   state.outflows = hydrated.outflows;
+  state.canonicalLedger = inputs.canonicalLedger ?? null;
   state.funding = fundingStateFromSources(hydrated.fundingSources);
   const provenanceSource = hydrated.fundingSources.find((source) => source.sourceRunId || source.inputSource);
   fundingProvenance = provenanceSource ? {
@@ -527,7 +536,10 @@ function applyCommittedInputs(inputs, dataSources, qualityReport) {
   } : { inputSource: "Ручной ввод в интерфейсе", sourceRunId: null, sourceCreatedAt: null, sourceAsOfDate: null };
   state.dataSources = dataSources;
   state.importReport = qualityReport;
-  syncBalanceControls("Источник: последний успешно зафиксированный расчет.");
+  const bankSource = dataSources.findLast((source) => source.bankBalanceCloseDate && !source.inheritedFromRunId);
+  syncBalanceControls(bankSource
+    ? `Банк: остаток на конец ${bankSource.bankBalanceCloseDate}; дата расчета ${inputs.asOfDate}. Получено ${bankSource.observedAt}.`
+    : "Источник: последний успешно зафиксированный расчет.");
   syncFundingControls();
   setScenario(state.scenario);
 }
@@ -541,9 +553,90 @@ const runStatusLabels = {
   [RUN_STATUS.ERROR]: ["Ошибка расчета", "error"]
 };
 
+function briefDate(value) {
+  const date = normalizeDate(value);
+  return date ? DATE.format(date) : value ?? "не указана";
+}
+
+function renderOperatorBrief() {
+  const container = document.querySelector("#operatorBriefContent");
+  const mode = document.querySelector("#briefMode");
+  if (!container) return;
+  const view = runController.view();
+  const brief = buildOperatorBrief(view.committed, priorSnapshot?.run ?? null);
+  if (!brief) {
+    if (mode) mode.textContent = "Нет расчета";
+    replaceChildren(container, [createTextElement(document, "p", "Загрузите данные и выполните расчет.", { className: "empty-state" })]);
+    return;
+  }
+  if (mode) mode.textContent = brief.isDemo ? "Демо" : view.visibleRunIsPrevious ? "Предыдущий расчет" : "Зафиксированный расчет";
+  const sourceLine = brief.bank
+    ? `Банк: остаток на конец ${briefDate(brief.bank.closeDate)}; получен ${brief.bank.observedAt ? `${MOSCOW_DATE_TIME.format(new Date(brief.bank.observedAt))} МСК` : "без времени получения"}. Не внутридневной остаток.`
+    : "Банковский факт не подключен. Остаток взят из демо, Excel или интерфейса.";
+  const planningLine = brief.planning
+    ? `ДЗ и исходящие: срез ${briefDate(brief.planning.asOfDate)} · ${brief.planning.ageWorkingDays} раб. дн. назад${brief.planning.inheritedFromRunId ? " · перенесен из прошлого расчета" : ""}.`
+    : "Дата обновления ДЗ и исходящих не подтверждена.";
+  const status = createElement(document, "div", { className: "operator-brief-status" },
+    createTextElement(document, "strong", `${briefDate(brief.asOfDate)} · ${scenarioLabel(brief.scenario)}`),
+    createTextElement(document, "small", `Run ${brief.runId} · ${brief.currency}`),
+    createTextElement(document, "span", sourceLine),
+    createTextElement(document, "span", planningLine));
+  if (brief.forecastStatus === "requires-planning-update") {
+    const blocker = createElement(document, "div", { className: "operator-brief-blocker", role: "alert" },
+      createTextElement(document, "strong", "Требует обновления"),
+      createTextElement(document, "span", `Плановые ДЗ и исходящие старше ${brief.planning.maxAgeWorkingDays} рабочих дней.`),
+      createTextElement(document, "span", "Загрузите свежую полную книгу. Прогноз на устаревших плановых данных не считается актуальным."));
+    replaceChildren(container, [status, blocker]);
+    return;
+  }
+  const gapLabel = brief.firstGapDate
+    ? `${briefDate(brief.firstGapDate)}${brief.riskWindowEndDate && brief.riskWindowEndDate !== brief.firstGapDate ? ` — ${briefDate(brief.riskWindowEndDate)}` : ""}`
+    : "Не обнаружен";
+  const metric = (label, value, note) => createElement(document, "div", { className: "operator-brief-metric" },
+    createTextElement(document, "span", label), createTextElement(document, "strong", value), createTextElement(document, "small", note));
+  const metrics = createElement(document, "div", { className: "operator-brief-metrics" },
+    metric(brief.openingBalanceIsBankFact ? "Входящий остаток банка" : "Стартовый остаток", formatMinorMoney(brief.openingBalanceMinor), brief.openingBalanceIsBankFact ? "На конец предыдущего банковского дня" : "Не подтвержден банком"),
+    metric("Ближайший разрыв", gapLabel, brief.firstGapDate ? `По ${scenarioLabel(brief.scenario)}; максимум ${formatMinorMoney(brief.maximumNeedMinor)} ${briefDate(brief.peakDate)}` : `По ${scenarioLabel(brief.scenario)} на горизонте расчета`),
+    metric("Покрытие и стоимость", `${brief.actions.length} действий · ${formatMinorMoney(brief.coverageCostMinor)}`, brief.actions.length ? "Примененный план" : "Действия не применены"),
+    metric("Не покрыто", formatMinorMoney(brief.uncoveredNeedMinor), brief.uncoveredNeedMinor ? "Требует решения CFO" : "По выбранному сценарию"));
+  const review = brief.quality.needsReview
+    ? createElement(document, "div", { className: "operator-brief-review" },
+      createTextElement(document, "strong", "Требует проверки"),
+      createTextElement(document, "span", `Ошибки ${brief.quality.errors} · поступления без ДЗ ${brief.quality.unmatchedPayments} · распределения на проверке ${brief.quality.pendingAllocations}`),
+      createTextElement(document, "span", "Перед отчетом CFO проверьте сверку и качество данных."))
+    : createTextElement(document, "p", "Ошибок и операций для ручной сверки нет.", { className: "operator-brief-clear" });
+  const causes = createElement(document, "details", { className: "operator-brief-detail" },
+    createTextElement(document, "summary", `Почему возникает разрыв · ${brief.causes.length} задержанных поступлений`),
+    brief.causes.length
+      ? createElement(document, "ul", {}, ...brief.causes.map((item) => createTextElement(document, "li", `${item.counterparty} · ${formatMinorMoney(item.amountMinor)} · план ${briefDate(item.plannedDate)}, сценарная дата ${briefDate(item.cashDate)}`)))
+      : createTextElement(document, "p", brief.firstGapDate ? "На дату разрыва нет задержанных поступлений из текущей ДЗ. Проверьте исходящие платежи и входящий остаток." : "Разрыва по выбранному сценарию нет."),
+    brief.gapOutflows.length ? createElement(document, "ul", {}, ...brief.gapOutflows.map((item) => createTextElement(document, "li", `Списание: ${item.category} · ${formatMinorMoney(item.amountMinor)}`))) : null);
+  const plan = createElement(document, "details", { className: "operator-brief-detail" },
+    createTextElement(document, "summary", "План покрытия"),
+    brief.actions.length
+      ? createElement(document, "ul", {}, ...brief.actions.map((item) => createTextElement(document, "li", `${item.name}: ${formatMinorMoney(item.amountMinor)}${item.effectiveDate ? ` с ${briefDate(item.effectiveDate)}` : ""}; стоимость ${formatMinorMoney(item.costMinor)}`)))
+      : createTextElement(document, "p", brief.maximumNeedMinor ? "Примененного покрытия нет. Проверьте условия источников на шаге 4." : "Покрытие не требуется по выбранному сценарию."));
+  const change = brief.change
+    ? createElement(document, "details", { className: "operator-brief-detail" },
+      createTextElement(document, "summary", "Изменение к прошлому расчету"),
+      createTextElement(document, "p", brief.change.status === "comparable"
+        ? `Run ${brief.change.previousRunId} · ${briefDate(brief.change.previousAsOfDate)} · общих дат ${brief.change.commonDates}${brief.change.identityVerified ? "" : " · юрлицо/счета прошлого файла не подтверждены"}.`
+        : `Сравнение недоступно: ${brief.change.reason}`),
+      brief.change.status === "comparable" ? createElement(document, "dl", {},
+        createTextElement(document, "dt", "Входящий остаток"), createTextElement(document, "dd", formatMinorMoney(brief.change.openingBalanceDeltaMinor)),
+        createTextElement(document, "dt", "Макс. потребность на общих датах"), createTextElement(document, "dd", formatMinorMoney(brief.change.maxNeedDeltaMinor)),
+        createTextElement(document, "dt", "Стоимость покрытия (весь горизонт)"), createTextElement(document, "dd", formatMinorMoney(brief.change.costDeltaMinor)),
+        createTextElement(document, "dt", "Не покрыто (весь горизонт)"), createTextElement(document, "dd", formatMinorMoney(brief.change.uncoveredDeltaMinor))) : null)
+    : createTextElement(document, "p", "Чтобы увидеть изменение, загрузите предыдущий файл расчета на шаге 2.", { className: "operator-brief-clear" });
+  replaceChildren(container, [status, metrics, review, createElement(document, "div", { className: "operator-brief-details" }, causes, plan, change)]);
+}
+
 function renderRunStatus() {
   const view = runController.view();
-  const [label, tone] = runStatusLabels[view.status];
+  const brief = buildOperatorBrief(view.committed, priorSnapshot?.run ?? null);
+  const planningStale = view.status === RUN_STATUS.CURRENT && brief?.forecastStatus === "requires-planning-update";
+  const [label, tone] = planningStale ? ["Требует обновления", "stale"] : runStatusLabels[view.status];
+  document.body.dataset.planningFreshness = planningStale ? "stale" : "current";
   const badge = document.querySelector("#runStatusBadge");
   const detail = document.querySelector("#runStatusDetail");
   if (badge) {
@@ -554,6 +647,8 @@ function renderRunStatus() {
     const run = view.committed;
     detail.textContent = view.error
       ? `${view.error}${run ? ` Предыдущий расчет ${run.runId} сохранен.` : ""}`
+      : planningStale
+        ? `Run ${view.committed.runId}: плановые ДЗ и исходящие старше ${brief.planning.maxAgeWorkingDays} рабочих дней. Загрузите свежую полную книгу.`
       : view.staleReason
         ? `${view.staleReason} Выполните новый расчет.`
         : view.status === RUN_STATUS.STAGED
@@ -564,11 +659,15 @@ function renderRunStatus() {
   }
   const snapshotButton = document.querySelector("#downloadSnapshotButton");
   if (snapshotButton) snapshotButton.disabled = !view.committed;
+  const exportButton = document.querySelector("#exportButton");
+  if (exportButton) exportButton.disabled = view.status !== RUN_STATUS.CURRENT || view.committed?.signOff?.cfoReport?.status !== SIGN_OFF_STATUS.CFO_READY;
   const calculateButton = document.querySelector("#calculateRunButton");
   if (calculateButton) calculateButton.disabled = view.status === RUN_STATUS.RUNNING;
   renderSignOff();
   renderQualitySummary();
   renderComparison();
+  renderOperatorBrief();
+  setWorkflowStep(workflowStep);
 }
 
 function signedDetail(confirmation) {
@@ -601,7 +700,8 @@ function renderSignOff() {
   if (cfoDetail) cfoDetail.textContent = cfoReady
     ? signedDetail(signOff.cfoReport.confirmation)
     : reconciliationConfirmed ? "Проверьте контроль готовности отчета ниже." : "Сначала подтвердите сверку.";
-  const current = view.status === RUN_STATUS.CURRENT;
+  const currentBrief = buildOperatorBrief(committed);
+  const current = view.status === RUN_STATUS.CURRENT && currentBrief?.forecastStatus !== "requires-planning-update";
   const reconciliationButton = document.querySelector("#confirmReconciliationButton");
   const cfoButton = document.querySelector("#confirmCfoButton");
   const acceptance = document.querySelector("#uncoveredGapAcceptanceInput");
@@ -649,6 +749,7 @@ function renderComparison() {
   const container = document.querySelector("#comparisonContent");
   if (!container) return;
   renderPriorFundingTransfer();
+  renderPriorLedgerChoice();
   const current = runController.view().committed;
   if (!priorSnapshot || !current) {
     replaceChildren(container, [createTextElement(document, "p", priorSnapshot
@@ -657,7 +758,12 @@ function renderComparison() {
     return;
   }
   const result = compareAuditRuns(current, priorSnapshot.run);
+  if (!result.compatibility.comparable) {
+    replaceChildren(container, [createTextElement(document, "p", `Расчеты не сопоставимы: ${result.compatibility.reasons.join(" ")} Текущий run ${current.runId}; предыдущий run ${priorSnapshot.run.runId}.`, { className: "empty-state" })]);
+    return;
+  }
   const metrics = [
+    ["Входящий остаток", result.metrics.openingBalanceMinor],
     ["Открытая ДЗ", result.metrics.openReceivablesMinor],
     ["Минимальный остаток", result.metrics.minimumClosingBalanceMinor],
     ["Макс. потребность", result.metrics.maximumFinancingNeedMinor],
@@ -679,6 +785,12 @@ function renderComparison() {
   const metricGrid = createElement(document, "dl", { className: "comparison-metrics" }, ...metrics.flatMap(([label, value]) => [
     createTextElement(document, "dt", label), createTextElement(document, "dd", deltaMoney(value))
   ]));
+  const scope = createTextElement(document, "p", `Общих дат: ${result.commonDates.length}${result.commonDates.length ? ` (${result.commonDates[0]} — ${result.commonDates.at(-1)})` : ""}. Юрлицо: ${result.compatibility.legalEntities.current ?? "не указано"}; счета: ${result.compatibility.accounts.current.length || "не указаны"}; валюта ${result.compatibility.currency}; сценарий ${result.compatibility.scenario}. ${result.compatibility.identityVerified ? "Источники сопоставимы." : "В старом файле не подтверждены юрлицо или счета; сравнение ориентировочное."}`, { className: "comparison-summary" });
+  const freshness = createTextElement(document, "p", `Свежесть банка: текущий ${result.compatibility.freshness.current.map((item) => item.closeDate ?? "не указана").join(", ") || "не указана"}; предыдущий ${result.compatibility.freshness.previous.map((item) => item.closeDate ?? "не указана").join(", ") || "не указана"}. Стоимость и непокрытый разрыв относятся ко всему горизонту каждого расчета.`, { className: "comparison-summary" });
+  const daily = result.dailyBalances.length
+    ? createElement(document, "details", {}, createTextElement(document, "summary", "Остаток и потребность по общим датам"),
+      createElement(document, "ul", { className: "comparison-list" }, ...result.dailyBalances.map((item) => createTextElement(document, "li", `${item.date}: остаток ${formatMinorMoney(item.previousMinor)} → ${formatMinorMoney(item.currentMinor)}; потребность ${formatMinorMoney(item.previousNeedMinor)} → ${formatMinorMoney(item.currentNeedMinor)}.`))))
+    : createTextElement(document, "p", "Общих дат горизонта нет: ежедневный остаток не сравнивается.", { className: "empty-state" });
   const receiptSummary = createTextElement(document, "p",
     `ДЗ: новых ${result.receivables.new.length}, исчезнувших ${result.receivables.disappeared.length}, измененных ${result.receivables.changed.length}. Контрольных сумм источников изменено: ${result.sourceFingerprintChanges.length}.`,
     { className: "comparison-summary" });
@@ -696,7 +808,7 @@ function renderComparison() {
   const fingerprints = result.sourceFingerprintChanges.length
     ? createElement(document, "ul", { className: "comparison-list" }, ...result.sourceFingerprintChanges.map((item) => createTextElement(document, "li", `${item.source}: ${item.previousSha256 ?? "нет"} → ${item.currentSha256 ?? "нет"}`)))
     : null;
-  replaceChildren(container, [header, metricGrid, receiptSummary, receiptSets, compared, fingerprints]);
+  replaceChildren(container, [header, scope, freshness, metricGrid, daily, receiptSummary, receiptSets, compared, fingerprints]);
 }
 
 function renderPriorFundingTransfer() {
@@ -710,6 +822,21 @@ function renderPriorFundingTransfer() {
   if (!run) return;
   if (summary) summary.textContent = `Источник: файл предыдущего расчета · Run ${run.runId} · расчет ${MOSCOW_DATE_TIME.format(new Date(run.createdAt))} МСК · дата данных ${run.asOfDate} · источников ${sources.length}.`;
   if (button) button.disabled = sources.length === 0;
+}
+
+function renderPriorLedgerChoice() {
+  const button = document.querySelector("#applyPriorLedgerButton");
+  const status = document.querySelector("#priorLedgerStatus");
+  const run = priorSnapshot?.run;
+  const ledger = run?.inputs?.canonicalLedger;
+  const eligible = Boolean(ledger?.receivables?.length && ledger?.bankBalances?.length
+    && Array.isArray(ledger.payments) && Array.isArray(ledger.allocations) && Array.isArray(ledger.outflows));
+  if (button) button.disabled = !eligible;
+  if (status) status.textContent = selectedPriorLedger
+    ? `База выбрана: run ${selectedPriorLedger.run.runId}, дата данных ${selectedPriorLedger.run.asOfDate}. Загрузите новый Bank + BankBalances; текущий расчет не заменен.`
+    : eligible ? `Доступна база run ${run.runId}, дата данных ${run.asOfDate}; перенос только после нажатия кнопки.`
+      : run ? "В этом файле нет исходных банковских событий и остатков для ежедневного обновления. Сравнение доступно."
+        : "Доступно для файла с сохраненными ДЗ, операциями и остатками. Затем загрузите Bank + BankBalances.";
 }
 
 function markRunStale(reason) {
@@ -740,6 +867,7 @@ async function executeCurrentRun() {
       outputs: calculation.outputs
     });
     applyCommittedInputs(inputs, run.sources, run.qualityReport);
+    selectedPriorLedger = null;
     render();
     renderImportReport();
     renderRunStatus();
@@ -1287,7 +1415,7 @@ function exportReport() {
 }
 
 const workflowSteps = [
-  { title: "Загрузить данные", description: "Выберите Excel и проверьте дату и входящий остаток." },
+  { title: "Загрузить данные", description: "Добавьте Excel. Затем проверьте дату расчета и остаток денег." },
   { title: "Проверить загрузку", description: "Убедитесь, что Excel прочитан без ошибок, а поступления банка сопоставлены с ДЗ." },
   { title: "Посмотреть прогноз и кассовый разрыв", description: "Сравните сценарные даты, минимальный остаток и потребность в ликвидности." },
   { title: "Выбрать план покрытия", description: "Укажите подтвержденные лимиты и пересчитайте стоимость покрытия." },
@@ -1295,9 +1423,17 @@ const workflowSteps = [
 ];
 
 let workflowStep = 1;
+let pendingWorkflowTarget = null;
+
+function hasCurrentWorkflowRun() {
+  return runController.view().status === RUN_STATUS.CURRENT;
+}
 
 function setWorkflowStep(nextStep, { scroll = false } = {}) {
-  workflowStep = Math.min(workflowSteps.length, Math.max(1, Number(nextStep) || 1));
+  const requestedStep = Math.min(workflowSteps.length, Math.max(1, Number(nextStep) || 1));
+  const runStatus = runController.view().status;
+  const keepFundingDraft = requestedStep === 4 && workflowStep === 4 && runStatus === RUN_STATUS.STALE;
+  workflowStep = requestedStep > 2 && !hasCurrentWorkflowRun() && !keepFundingDraft ? 2 : requestedStep;
   document.body.dataset.workflowStep = String(workflowStep);
   const current = workflowSteps[workflowStep - 1];
   const kicker = document.querySelector("#workflowKicker");
@@ -1311,14 +1447,23 @@ function setWorkflowStep(nextStep, { scroll = false } = {}) {
     if (target === workflowStep) button.setAttribute("aria-current", "step");
     else button.removeAttribute("aria-current");
     button.dataset.complete = String(target < workflowStep);
+    const canCalculatePreparedData = [RUN_STATUS.STAGED, RUN_STATUS.STALE].includes(runStatus);
+    button.disabled = target > 2 && !hasCurrentWorkflowRun() && !canCalculatePreparedData && !(target === 4 && keepFundingDraft);
+    button.dataset.requiresCalculation = String(target > 2 && !hasCurrentWorkflowRun() && canCalculatePreparedData);
   });
   const previous = document.querySelector("#workflowPrevButton");
   const next = document.querySelector("#workflowNextButton");
   if (previous) previous.disabled = workflowStep === 1;
   if (next) {
-    next.disabled = workflowStep === workflowSteps.length;
-    next.textContent = workflowStep === workflowSteps.length ? "Готово" : "Далее";
+    const status = runStatus;
+    next.disabled = workflowStep === workflowSteps.length || (workflowStep === 2 && ![RUN_STATUS.CURRENT, RUN_STATUS.STAGED, RUN_STATUS.STALE].includes(status));
+    if (workflowStep > 2 && status !== RUN_STATUS.CURRENT) next.disabled = true;
+    next.textContent = ["Перейти к проверке", status === RUN_STATUS.CURRENT ? "Показать прогноз" : "Рассчитать и показать прогноз", "Выбрать покрытие", "Подготовить отчет", "Готово"][workflowStep - 1];
   }
+  const calculate = document.querySelector("#calculateRunButton");
+  if (calculate) calculate.textContent = workflowStep === 4 ? "Пересчитать план покрытия" : "Рассчитать и показать прогноз";
+  const feedback = document.querySelector("#calculationFeedback");
+  if (feedback && workflowStep !== 4) feedback.hidden = true;
   if (scroll) document.querySelector("#workflow")?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
@@ -1381,12 +1526,27 @@ async function importAuditSnapshot(file) {
 
 document.querySelector("#startWorkflowButton")?.addEventListener("click", (event) => {
   event.preventDefault();
+  document.body.classList.add("workflow-started");
   setWorkflowStep(1, { scroll: true });
   document.querySelector("#excelInput")?.click();
 });
 
+document.querySelector('.nav-list a[href="#workflow"]')?.addEventListener("click", (event) => {
+  event.preventDefault();
+  document.body.classList.add("workflow-started");
+  setWorkflowStep(1, { scroll: true });
+});
+
 document.querySelectorAll("[data-workflow-target]").forEach((button) => {
-  button.addEventListener("click", () => setWorkflowStep(button.dataset.workflowTarget, { scroll: true }));
+  button.addEventListener("click", () => {
+    const target = Number(button.dataset.workflowTarget);
+    if (target > 2 && !hasCurrentWorkflowRun()) {
+      pendingWorkflowTarget = target;
+      document.querySelector("#calculateRunButton")?.click();
+      return;
+    }
+    setWorkflowStep(target, { scroll: true });
+  });
 });
 
 document.querySelector("#workflowPrevButton")?.addEventListener("click", () => {
@@ -1394,6 +1554,10 @@ document.querySelector("#workflowPrevButton")?.addEventListener("click", () => {
 });
 
 document.querySelector("#workflowNextButton")?.addEventListener("click", () => {
+  if (workflowStep === 2 && !hasCurrentWorkflowRun()) {
+    document.querySelector("#calculateRunButton")?.click();
+    return;
+  }
   setWorkflowStep(workflowStep + 1, { scroll: true });
 });
 
@@ -1408,6 +1572,7 @@ document.querySelector("#exportButton").addEventListener("click", () => {
 document.querySelector("#loadSampleButton").addEventListener("click", async () => {
   runController.reset();
   priorSnapshot = null;
+  selectedPriorLedger = null;
   const operatorInput = document.querySelector("#signOffOperatorInput");
   if (operatorInput) operatorInput.value = "";
   loadDemo();
@@ -1431,13 +1596,23 @@ async function prepareExcelFile(file) {
     uploadZone?.setAttribute("aria-busy", "true");
     if (fileName) fileName.textContent = file.name;
     setUploadStatus("Читаю и проверяю Excel-файл...", "neutral");
-    const data = await readExcelFile(file, { fallbackDate: forecastStartDate });
+    const uploaded = await readExcelFile(file, { fallbackDate: forecastStartDate });
+    if (uploaded.kind === "bank-update" && !selectedPriorLedger) {
+      throw new Error("Для обновления только банка сначала загрузите прошлый файл расчета и явно выберите его как базу.");
+    }
+    const data = uploaded.kind === "bank-update"
+      ? applyBankUpdateToPriorLedger(selectedPriorLedger.run.inputs.canonicalLedger, uploaded)
+      : uploaded;
     state.importReport = data.report;
     renderImportReport();
-    if (data.balance) {
+    if (uploaded.kind === "bank-update") {
+      setUploadStatus(`Банк проверен на ${data.asOfDate.toLocaleDateString("ru-RU")}; предыдущий расчет остается на экране до нового запуска.`, "success");
+    } else if (data.balance) {
       forecastStartDate = data.balance.date;
       state.openingBalance = data.balance.openingBalance;
-      syncBalanceControls("Подготовлено из листа Остатки. До нового расчета на экране остается предыдущий результат.");
+      syncBalanceControls(data.bankFreshness
+        ? `Банк: остаток на конец ${data.bankFreshness.sourceCloseDate}; дата расчета ${data.asOfDate.toLocaleDateString("ru-RU")}. Получено ${data.bankFreshness.observedAt}. До расчета показан предыдущий результат.`
+        : "Подготовлено из листа Остатки. До нового расчета на экране остается предыдущий результат.");
     } else {
       const inferredStartDate = inferForecastStartDate(data.receipts, data.outflows);
       if (inferredStartDate) {
@@ -1448,15 +1623,36 @@ async function prepareExcelFile(file) {
       }
     }
     const fileSha256 = await sha256Hex(await file.arrayBuffer());
+    const canonicalLedger = data.kind === "canonical"
+      ? canonicalLedgerForRun({
+        reconciliation: data.reconciliation,
+        outflows: data.outflows,
+        bankBalances: data.bankBalances ?? [],
+        balance: data.balance ?? { openingBalance: state.openingBalance },
+        asOfDate: data.asOfDate
+      }) : data.canonicalLedger ?? null;
     const staged = {
       receipts: data.receipts,
       outflows: data.outflows,
-      dataSources: [{
+      asOfDate: data.asOfDate ?? forecastStartDate,
+      openingBalance: canonicalLedger ? canonicalLedger.openingBalanceMinor / 100 : data.balance?.openingBalance ?? state.openingBalance,
+      canonicalLedger,
+      dataSources: [...(uploaded.kind === "bank-update" ? selectedPriorLedger.run.sources.map((source) => ({
+        ...source,
+        inheritedFromRunId: selectedPriorLedger.run.runId,
+        planningAsOfDate: source.planningAsOfDate ?? null
+      })) : []), {
         type: "xlsx",
         name: file.name,
         sizeBytes: file.size,
         lastModified: file.lastModified ? new Date(file.lastModified).toISOString() : null,
-        sha256: fileSha256
+        sha256: fileSha256,
+        bankBalanceCloseDate: data.bankFreshness?.sourceCloseDate ?? null,
+        observedAt: data.bankFreshness?.observedAt ?? null,
+        bankAccountCount: data.bankFreshness?.accountCount ?? null,
+        bankAccounts: data.bankBalances?.map((item) => `${item.bankId}|${item.legalEntityId}|${item.accountId}`) ?? [],
+        planningAsOfDate: uploaded.kind === "bank-update" ? null : dateOnly(data.asOfDate ?? forecastStartDate),
+        baseRunId: uploaded.kind === "bank-update" ? selectedPriorLedger.run.runId : null
       }],
       qualityReport: data.report
     };
@@ -1464,7 +1660,9 @@ async function prepareExcelFile(file) {
     const acceptance = document.querySelector("#uncoveredGapAcceptanceInput");
     if (acceptance) acceptance.checked = false;
     renderRunStatus();
-    setUploadStatus(`Проверка завершена: поступлений ${data.receipts.length}, исходящих ${data.outflows.length}.`, "success");
+    setUploadStatus(uploaded.kind === "bank-update"
+      ? `Данные подготовлены из run ${selectedPriorLedger.run.runId}: банк ${uploaded.payments.length} операций, открытых ДЗ ${data.receipts.length}. Нажмите «Рассчитать прогноз».`
+      : `Проверка завершена: поступлений ${data.receipts.length}, исходящих ${data.outflows.length}.`, "success");
     setWorkflowStep(2, { scroll: true });
   } catch (error) {
     if (error instanceof ExcelIntakeError && error.report) {
@@ -1576,16 +1774,40 @@ document.addEventListener("click", (event) => {
 
 document.querySelector("#calculateRunButton")?.addEventListener("click", async () => {
   const button = document.querySelector("#calculateRunButton");
+  const feedback = document.querySelector("#calculationFeedback");
   const originalLabel = button.textContent;
   try {
     const startedFromStep = workflowStep;
-    button.textContent = "Считаю прогноз...";
+    button.textContent = startedFromStep === 4 ? "Пересчитываю покрытие..." : "Считаю прогноз...";
+    button.disabled = true;
+    if (feedback) feedback.hidden = true;
     await executeCurrentRun();
-    setUploadStatus("Расчет успешно зафиксирован. Результат актуален.", "success");
-    if (startedFromStep === 2) setWorkflowStep(3, { scroll: true });
+    const brief = buildOperatorBrief(runController.view().committed);
+    setUploadStatus(brief?.forecastStatus === "requires-planning-update"
+      ? "Расчет выполнен, но прогноз требует свежей полной выгрузки ДЗ и исходящих."
+      : "Расчет успешно зафиксирован. Результат актуален.", brief?.forecastStatus === "requires-planning-update" ? "warning" : "success");
+    if (startedFromStep === 2) {
+      const targetStep = pendingWorkflowTarget ?? 3;
+      pendingWorkflowTarget = null;
+      setWorkflowStep(targetStep, { scroll: true });
+    } else if (startedFromStep === 4 && feedback) {
+      const coveredMinor = Math.max(0, brief.maximumNeedMinor - brief.uncoveredNeedMinor);
+      feedback.textContent = `План покрытия обновлен. Потребность: ${formatMinorMoney(brief.maximumNeedMinor)} · Покрыто: ${formatMinorMoney(coveredMinor)} · Стоимость: ${formatMinorMoney(brief.coverageCostMinor)} · Не покрыто: ${formatMinorMoney(brief.uncoveredNeedMinor)}`;
+      feedback.dataset.tone = brief.uncoveredNeedMinor > 0 ? "warning" : "success";
+      feedback.hidden = false;
+      feedback.focus({ preventScroll: true });
+      feedback.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
   } catch (error) {
+    pendingWorkflowTarget = null;
     setUploadStatus(error.message, "error");
+    if (feedback) {
+      feedback.textContent = `Не удалось обновить план покрытия: ${error.message}`;
+      feedback.dataset.tone = "error";
+      feedback.hidden = false;
+    }
   } finally {
+    button.disabled = false;
     button.textContent = originalLabel;
   }
 });
@@ -1613,12 +1835,27 @@ document.querySelector("#priorSnapshotInput")?.addEventListener("change", async 
     const currentRunId = runController.view().committed?.runId;
     const parsed = await parseAuditSnapshot(await file.text());
     priorSnapshot = parsed;
+    selectedPriorLedger = null;
     renderComparison();
     setUploadStatus(`Предыдущий расчет ${parsed.run.runId} загружен только для сравнения. Текущий run ${currentRunId ?? "не создан"} не заменен.`, "success");
   } catch (error) {
     setUploadStatus(`Файл предыдущего расчета отклонен: ${error.message}`, "error");
   } finally {
     event.target.value = "";
+  }
+});
+
+document.querySelector("#applyPriorLedgerButton")?.addEventListener("click", () => {
+  try {
+    const run = priorSnapshot?.run;
+    const ledger = run?.inputs?.canonicalLedger;
+    if (!ledger?.bankBalances?.length) throw new Error("В прошлом файле нет закрытых банковских остатков для переноса.");
+    selectedPriorLedger = { run };
+    renderPriorLedgerChoice();
+    setUploadStatus(`База run ${run.runId} выбрана явно. Текущий расчет не изменен; загрузите новый Bank + BankBalances.`, "success");
+    setWorkflowStep(1, { scroll: true });
+  } catch (error) {
+    setUploadStatus(error.message, "error");
   }
 });
 

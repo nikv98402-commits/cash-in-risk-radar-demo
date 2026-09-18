@@ -62,9 +62,18 @@ function outflowAmountMinor(outflow, index) {
 
 function openingAmountMinor(input) {
   if (Object.hasOwn(input, "openingBalanceMinor")) {
-    return requireMinor(input.openingBalanceMinor, "openingBalanceMinor");
+    if (!Number.isSafeInteger(input.openingBalanceMinor)) {
+      throw new ForecastValidationError("openingBalanceMinor: ожидается сумма в целых минимальных денежных единицах.");
+    }
+    return input.openingBalanceMinor;
   }
-  return majorToMinor(input.openingBalance, "openingBalance");
+  const numeric = Number(input.openingBalance);
+  const scaled = numeric * 100;
+  const rounded = Math.round(scaled);
+  if (!Number.isFinite(numeric) || !Number.isSafeInteger(rounded) || Math.abs(scaled - rounded) > 1e-6) {
+    throw new ForecastValidationError("openingBalance: сумма должна содержать не более двух знаков после запятой.");
+  }
+  return rounded;
 }
 
 function addToDateMap(map, date, amountMinor) {

@@ -25,7 +25,7 @@ function payerKey(value) {
 }
 
 function targetKey(value) {
-  return `${value.receivableId}|${value.paymentScheduleId}`;
+  return `${value.legalEntityId}|${value.receivableId}|${value.paymentScheduleId}`;
 }
 
 function sumBy(items, keyFor) {

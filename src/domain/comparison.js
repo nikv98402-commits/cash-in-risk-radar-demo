@@ -16,16 +16,52 @@ function dateDistance(previous, current) {
   return Number.isFinite(left) && Number.isFinite(right) ? Math.round((right - left) / 86_400_000) : null;
 }
 
-function runMetrics(run) {
-  const calendar = run.outputs?.calendar ?? [];
-  const closings = calendar.map((day) => money(day.closingBalanceMinor));
-  const needs = calendar.map((day) => money(day.financingNeedMinor));
+function runMetrics(run, dates = null) {
+  const calendar = (run.outputs?.calendar ?? []).filter((day) => !dates || dates.has(day.date));
+  let minimumClosingBalanceMinor = null;
+  let maximumFinancingNeedMinor = 0;
+  for (const day of calendar) {
+    const closing = money(day.closingBalanceMinor);
+    minimumClosingBalanceMinor = minimumClosingBalanceMinor === null ? closing : Math.min(minimumClosingBalanceMinor, closing);
+    maximumFinancingNeedMinor = Math.max(maximumFinancingNeedMinor, money(day.financingNeedMinor));
+  }
   return {
+    openingBalanceMinor: money(run.inputs?.openingBalanceMinor),
     openReceivablesMinor: (run.inputs?.receipts ?? []).reduce((sum, item) => sum + money(item.remainingAmountMinor ?? item.amountMinor), 0),
-    minimumClosingBalanceMinor: closings.length ? Math.min(...closings) : 0,
-    maximumFinancingNeedMinor: needs.length ? Math.max(...needs) : 0,
+    minimumClosingBalanceMinor: minimumClosingBalanceMinor ?? 0,
+    maximumFinancingNeedMinor,
     coverageCostMinor: money(run.outputs?.funding?.totalCostMinor),
     uncoveredNeedMinor: money(run.outputs?.funding?.uncoveredNeedMinor)
+  };
+}
+
+function accountSet(run) {
+  const balances = run.inputs?.canonicalLedger?.bankBalances ?? [];
+  return [...new Set(balances.map((item) => JSON.stringify([item.bankId, item.accountId])))].sort();
+}
+
+function compatibility(current, previous) {
+  const reasons = [];
+  if (current.currency !== previous.currency) reasons.push("Разные валюты расчетов.");
+  if (current.scenario !== previous.scenario) reasons.push("Разные сценарии расчетов.");
+  const currentLedger = current.inputs?.canonicalLedger;
+  const previousLedger = previous.inputs?.canonicalLedger;
+  if (currentLedger && previousLedger) {
+    if (currentLedger.legalEntityId !== previousLedger.legalEntityId) reasons.push("Разные юридические лица.");
+    if (JSON.stringify(accountSet(current)) !== JSON.stringify(accountSet(previous))) reasons.push("Разный набор банковских счетов.");
+  }
+  return {
+    comparable: reasons.length === 0,
+    reasons,
+    identityVerified: Boolean(currentLedger && previousLedger && accountSet(current).length && accountSet(previous).length),
+    accounts: { current: accountSet(current), previous: accountSet(previous) },
+    legalEntities: { current: currentLedger?.legalEntityId ?? null, previous: previousLedger?.legalEntityId ?? null },
+    currency: current.currency,
+    scenario: current.scenario,
+    freshness: {
+      current: (current.sources ?? []).map((item) => ({ closeDate: item.bankBalanceCloseDate ?? null, observedAt: item.observedAt ?? null })),
+      previous: (previous.sources ?? []).map((item) => ({ closeDate: item.bankBalanceCloseDate ?? null, observedAt: item.observedAt ?? null }))
+    }
   };
 }
 
@@ -70,8 +106,13 @@ function fundingMap(run) {
 export function compareAuditRuns(currentRun, previousRun) {
   const current = requireRun(currentRun, "Текущий run");
   const previous = requireRun(previousRun, "Предыдущий run");
-  const currentMetrics = runMetrics(current);
-  const previousMetrics = runMetrics(previous);
+  const match = compatibility(current, previous);
+  if (!match.comparable) return { current: { runId: current.runId }, previous: { runId: previous.runId }, compatibility: match, commonDates: [] };
+  const previousDates = new Set((previous.outputs?.calendar ?? []).map((day) => day.date));
+  const commonDates = [...new Set((current.outputs?.calendar ?? []).map((day) => day.date).filter((date) => previousDates.has(date)))].sort();
+  const dates = new Set(commonDates);
+  const currentMetrics = runMetrics(current, dates);
+  const previousMetrics = runMetrics(previous, dates);
   const metricDelta = Object.fromEntries(Object.keys(currentMetrics).map((key) => [key, {
     previousMinor: previousMetrics[key],
     currentMinor: currentMetrics[key],
@@ -125,6 +166,13 @@ export function compareAuditRuns(currentRun, previousRun) {
   return {
     current: { runId: current.runId, createdAt: current.createdAt, asOfDate: current.asOfDate },
     previous: { runId: previous.runId, createdAt: previous.createdAt, asOfDate: previous.asOfDate },
+    compatibility: match,
+    commonDates,
+    dailyBalances: commonDates.map((date) => {
+      const after = current.outputs.calendar.find((day) => day.date === date);
+      const before = previous.outputs.calendar.find((day) => day.date === date);
+      return { date, previousMinor: money(before.closingBalanceMinor), currentMinor: money(after.closingBalanceMinor), deltaMinor: money(after.closingBalanceMinor) - money(before.closingBalanceMinor), previousNeedMinor: money(before.financingNeedMinor), currentNeedMinor: money(after.financingNeedMinor) };
+    }),
     metrics: metricDelta,
     receivables: { new: newReceivables, disappeared: disappearedReceivables, compared: comparedReceivables, changed: changedReceivables },
     sourceFingerprintChanges,

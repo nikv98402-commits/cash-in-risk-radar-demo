@@ -6,7 +6,7 @@
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; worker-src 'none'; manifest-src 'none'" />
     <link rel="icon" href="data:," />
     <title>Cash-In Risk Radar — Cash Gap Audit</title>
-    <link rel="stylesheet" href="styles.css?v=guided-forecast-3" />
+    <link rel="stylesheet" href="styles.css?v=workflow-audit-2" />
   </head>
   <body>
     <div class="app-shell">
@@ -30,16 +30,49 @@
       <main>
         <header class="sales-hero">
           <div class="sales-hero-copy">
-            <p class="eyebrow">Cash Gap Audit</p>
-            <h1>Показываем, какие поступления задержатся, когда возникнет кассовый разрыв и чем его закрыть</h1>
-            <p class="hero-subtitle">Расчет ликвидности на 30 дней для CFO и казначейства.</p>
-              <div class="hero-actions">
-                <a id="startWorkflowButton" class="primary-button hero-cta" href="#workflow">Начать расчет</a>
-              </div>
-              <small class="hero-action-hint">Выберите Excel. Проверка начнется автоматически.</small>
-            <p class="ai-boundary-note">AI помогает проверить выгрузку и объяснить результат; суммы и даты рассчитываются детерминированной моделью.</p>
+            <p class="hero-kicker">Контроль ликвидности на 30 дней</p>
+            <h1>Деньги задержатся. Вы узнаете об этом раньше.</h1>
+            <p class="hero-subtitle">Cash-In Risk Radar переносит поступления на реалистичные даты, находит будущий кассовый разрыв и считает стоимость покрытия.</p>
+            <div class="hero-actions">
+              <a id="startWorkflowButton" class="primary-button hero-cta" href="#workflow">Начать расчет</a>
+              <span class="hero-action-hint">Первый результат после загрузки Excel</span>
+            </div>
+            <p class="hero-trust-note"><strong>Расчет прозрачен.</strong> Суммы и даты считает детерминированная модель. AI только проверяет данные и объясняет результат.</p>
+          </div>
+          <div class="hero-result-map hero-terminal" aria-label="Демонстрация прогноза Cash-In Risk Radar">
+            <div class="hero-live-heading">
+              <div><p class="hero-result-label">Пример прогноза</p><strong>Ликвидность · 30 дней</strong></div>
+              <span class="hero-live-status"><i></i>Данные актуальны</span>
+            </div>
+            <div class="hero-terminal-alert">
+              <div><span>Поступление под риском</span><strong>500 000 руб.</strong></div>
+              <b>+4 дня</b>
+            </div>
+            <div class="hero-liquidity-chart" aria-hidden="true">
+              <div class="hero-chart-scale"><span>1,0 млн</span><span>0</span></div>
+              <svg viewBox="0 0 560 170" preserveAspectRatio="none">
+                <line x1="0" y1="132" x2="560" y2="132" class="hero-zero-line"></line>
+                <rect x="235" y="18" width="128" height="128" class="hero-risk-zone"></rect>
+                <path d="M0 42 L82 42 L150 68 L232 68 L258 132 L362 132 L390 74 L560 74" class="hero-balance-line"></path>
+                <circle cx="258" cy="132" r="6" class="hero-risk-point"></circle>
+                <circle cx="390" cy="74" r="6" class="hero-recovery-point"></circle>
+              </svg>
+              <div class="hero-chart-dates"><span>26 июн.</span><b>30 июн.<small>план</small></b><b>4 июл.<small>ожидаем</small></b><span>10 июл.</span></div>
+            </div>
+            <div class="hero-terminal-footer">
+              <div><span>Риск-окно</span><strong>30 июн. – 4 июл.</strong></div>
+              <div><span>Действие</span><strong>Подготовить покрытие</strong></div>
+            </div>
           </div>
         </header>
+
+        <section id="operatorBrief" class="section operator-brief" aria-labelledby="operatorBriefTitle" aria-live="polite">
+          <div class="operator-brief-heading">
+            <div><p class="eyebrow">Ежедневный обзор</p><h2 id="operatorBriefTitle">Состояние расчета</h2></div>
+            <span id="briefMode" class="operator-brief-mode">Демо</span>
+          </div>
+          <div id="operatorBriefContent"></div>
+        </section>
 
         <section id="workflow" class="workflow-shell" aria-labelledby="workflowTitle">
           <ol class="workflow-stepper" aria-label="Этапы расчета">
@@ -285,6 +318,9 @@
         </section>
 
         <section id="calendar" class="section panel primary-artifact workflow-stage workflow-stage-3">
+          <details class="calculation-details">
+            <summary><span><b>Платежный календарь</b><small>Показать ежедневный расчет за 30 дней</small></span></summary>
+            <div class="calculation-details-body">
           <div class="panel-header">
             <div>
               <p class="eyebrow">Расчет</p>
@@ -321,10 +357,15 @@
               <tbody id="calendarRows"></tbody>
             </table>
           </div>
+            </div>
+          </details>
         </section>
 
         <section id="receipts" class="section split workflow-stage workflow-stage-3">
           <div class="panel">
+            <details class="calculation-details">
+              <summary><span><b>Сценарные даты поступлений</b><small>Плановая и ожидаемая дата по каждой ДЗ</small></span></summary>
+              <div class="calculation-details-body">
             <div class="panel-header">
               <div>
                 <p class="eyebrow">ДЗ</p>
@@ -353,6 +394,8 @@
                 <tbody id="receiptRows"></tbody>
               </table>
             </div>
+              </div>
+            </details>
           </div>
 
           <div class="panel compact-disclosure-section">
@@ -364,6 +407,9 @@
         </section>
 
         <section id="debtors" class="section panel workflow-stage workflow-stage-3">
+          <details class="calculation-details">
+            <summary><span><b>Контрагенты</b><small>Показать историю и сдвиги по дебиторам</small></span></summary>
+            <div class="calculation-details-body">
           <div class="panel-header">
             <div>
               <p class="eyebrow">Контрагенты</p>
@@ -371,6 +417,8 @@
             </div>
           </div>
           <div id="debtorCards" class="debtor-grid"></div>
+            </div>
+          </details>
         </section>
 
         <section id="actions" class="section panel workflow-stage workflow-stage-4">
@@ -388,6 +436,9 @@
             <span>Рекомендация аудита</span>
             <strong>Резерв → перенос → факторинг → овердрафт → кредитная линия.</strong>
           </div>
+          <details class="calculation-details funding-result-details">
+            <summary><span><b>Результат по источникам</b><small>Сумма, стоимость и остаток разрыва</small></span></summary>
+            <div class="calculation-details-body">
           <div class="table-wrap">
             <table>
               <thead>
@@ -404,6 +455,8 @@
               <tbody id="actionRows"></tbody>
             </table>
           </div>
+            </div>
+          </details>
         </section>
 
         <section id="data" class="section data-layout workflow-stage workflow-stage-data">
@@ -420,7 +473,7 @@
                 <h2>Загрузить данные</h2>
               </div>
             </div>
-            <p class="data-note workflow-part workflow-part-intake">Выгрузка из 1С, ERP или банка в формате Excel.</p>
+            <p class="data-note workflow-part workflow-part-intake">Один файл: поступления, обязательные платежи и стартовый остаток.</p>
             <div class="run-control" aria-live="polite">
               <div class="run-control-status">
                 <span id="runStatusBadge" class="run-status-badge" data-tone="neutral">Данные не рассчитаны</span>
@@ -431,9 +484,10 @@
                 <button id="calculateRunButton" class="primary-button workflow-action workflow-action-calculate">Рассчитать прогноз</button>
                 <button id="downloadSnapshotButton" class="workflow-action workflow-action-report" disabled>Скачать файл расчета</button>
                 <button id="exportButton" class="workflow-action workflow-action-report">Скачать CSV для CFO</button>
-                <button id="uploadSnapshotButton" class="workflow-action workflow-action-intake">Восстановить расчет из файла</button>
+                <button id="uploadSnapshotButton" class="workflow-action workflow-action-intake">Загрузить сохраненный расчет</button>
                 <input id="snapshotInput" class="visually-hidden" type="file" accept=".json,application/json" aria-label="Файл расчета в формате JSON для восстановления" />
               </div>
+              <p id="calculationFeedback" class="calculation-feedback" role="status" tabindex="-1" hidden></p>
               <p class="calculation-file-note workflow-part workflow-part-report"><strong>Файл расчета (.json)</strong> хранит данные, результат и подтверждения. Нужен для сравнения и восстановления.</p>
             </div>
             <div class="audit-closeout-grid">
@@ -445,6 +499,10 @@
                   </div>
                   <button id="uploadPriorSnapshotButton">Загрузить предыдущий расчет</button>
                   <input id="priorSnapshotInput" class="visually-hidden" type="file" accept=".json,application/json" aria-label="Файл предыдущего расчета в формате JSON для сравнения" />
+                </div>
+                <div class="prior-ledger-choice">
+                  <button id="applyPriorLedgerButton" type="button" disabled>Использовать данные прошлого расчета для обновления банка</button>
+                  <small id="priorLedgerStatus">Доступно для файла с сохраненными ДЗ, операциями и остатками. Затем загрузите Bank + BankBalances.</small>
                 </div>
                 <div id="comparisonContent" class="comparison-content" aria-live="polite">
                   <p class="empty-state">Предыдущий расчет не загружен. Здесь появится сравнение с текущим расчетом.</p>
@@ -516,8 +574,8 @@
               <input id="excelInput" class="visually-hidden" type="file" accept=".xlsx" aria-label="Excel-файл исходных данных" />
               <label class="file-picker-button" for="excelInput">Выбрать Excel</label>
               <div>
-                <strong id="selectedFileName">Файл не выбран</strong>
-                <span id="uploadStatus">Нужны поступления, исходящие платежи и стартовый остаток.</span>
+                <strong id="selectedFileName">Добавьте Excel для расчета</strong>
+                <span id="uploadStatus">Поступления, обязательные платежи и стартовый остаток.</span>
               </div>
             </div>
             <div class="balance-controls workflow-part workflow-part-intake">
@@ -606,6 +664,6 @@
     </div>
 
     <script src="vendor/xlsx/0.20.3/xlsx.full.min.js?v=0.20.3"></script>
-    <script type="module" src="app.js?v=guided-forecast-3"></script>
+    <script type="module" src="app.js?v=workflow-audit-2"></script>
   </body>
 </html>

@@ -18,8 +18,8 @@ function allocationTargetsReceivable(allocation, receivable) {
     && allocation.paymentScheduleId === receivable.paymentScheduleId;
 }
 
-function allocationTargetKey(allocation) {
-  return `${allocation.receivableId}|${allocation.paymentScheduleId}`;
+function allocationTargetKey(allocation, legalEntityId = allocation.legalEntityId) {
+  return `${legalEntityId}|${allocation.receivableId}|${allocation.paymentScheduleId}`;
 }
 
 function groupBy(items, keyFor) {
@@ -130,7 +130,8 @@ export function buildLedger({ receivables = [], payments = [], allocations = [],
   const receivablesByTarget = new Map(acceptedReceivables.map((item) => [`${item.legalEntityId}|${item.receivableId}|${item.paymentScheduleId}`, item]));
   const paymentsById = new Map(acceptedPayments.map((item) => [item.paymentId, item]));
   const allocationsByPayment = groupBy(acceptedAllocations, (item) => item.paymentId);
-  const allocationsByTarget = groupBy(acceptedAllocations, allocationTargetKey);
+  const allocationsByTarget = groupBy(acceptedAllocations, (allocation) =>
+    allocationTargetKey(allocation, paymentsById.get(allocation.paymentId)?.legalEntityId));
 
   acceptedReceivables.forEach((receivable) => {
     if (!validMinorAmount(receivable.originalAmountMinor)) errors.push(`Receivables ${receivable.receivableId}: originalAmountMinor должен быть положительным целым числом.`);

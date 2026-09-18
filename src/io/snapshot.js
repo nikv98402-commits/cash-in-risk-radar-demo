@@ -2,7 +2,7 @@ import { parseDateOnly, toDateOnly } from "../domain/date.js";
 
 export const SNAPSHOT_FORMAT = "cash-in-risk-audit-snapshot";
 export const SNAPSHOT_VERSION = "1.0.0";
-export const MAX_SNAPSHOT_BYTES = 10 * 1024 * 1024;
+export const MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024;
 
 export class SnapshotValidationError extends Error {
   constructor(message, code = "INVALID_SNAPSHOT") {
@@ -95,6 +95,37 @@ function validateRun(run) {
   if (!Array.isArray(run.inputs.receipts) || !Array.isArray(run.inputs.outflows) || !Array.isArray(run.inputs.fundingSources)) {
     throw new SnapshotValidationError("snapshot.run.inputs должен содержать receipts, outflows и fundingSources.");
   }
+  if (run.inputs.canonicalLedger !== undefined) {
+    const ledger = requireObject(run.inputs.canonicalLedger, "snapshot.run.inputs.canonicalLedger");
+    if (ledger.version !== "1.0.0" || !String(ledger.legalEntityId ?? "").trim()
+      || ledger.currency !== run.currency || ledger.asOfDate !== run.asOfDate
+      || !Number.isSafeInteger(ledger.openingBalanceMinor)
+      || ledger.openingBalanceMinor !== run.inputs.openingBalanceMinor) {
+      throw new SnapshotValidationError("Канонический ledger не совпадает с датой, валютой или остатком расчета.");
+    }
+    ["receivables", "payments", "allocations", "outflows", "bankBalances"].forEach((key) => {
+      if (!Array.isArray(ledger[key])) throw new SnapshotValidationError(`Канонический ledger не содержит ${key}.`);
+    });
+    ledger.receivables.forEach((item) => {
+      if (item.legalEntityId !== ledger.legalEntityId || item.currency !== ledger.currency
+        || !DATE_ONLY.test(String(item.contractualDueDate ?? ""))) {
+        throw new SnapshotValidationError("Каноническая ДЗ содержит чужое юрлицо, валюту или дату.");
+      }
+    });
+    ledger.payments.forEach((item) => {
+      if (item.legalEntityId !== ledger.legalEntityId || item.currency !== ledger.currency
+        || !DATE_ONLY.test(String(item.bookingDate ?? ""))) {
+        throw new SnapshotValidationError("Банковское событие содержит чужое юрлицо, валюту или дату.");
+      }
+    });
+    ledger.bankBalances.forEach((item) => {
+      if (item.legalEntityId !== ledger.legalEntityId || item.currency !== ledger.currency
+        || !DATE_ONLY.test(String(item.balanceDate ?? ""))
+        || item.asOfDate !== ledger.asOfDate || Number.isNaN(Date.parse(item.observedAt))) {
+        throw new SnapshotValidationError("Банковский остаток содержит чужой счет, дату или время получения.");
+      }
+    });
+  }
   if (!Array.isArray(run.outputs.calendar) || !Array.isArray(run.outputs.scenarioDates)) {
     throw new SnapshotValidationError("snapshot.run.outputs должен содержать calendar и scenarioDates.");
   }
@@ -175,7 +206,7 @@ export async function createAuditSnapshot(run, { clock = () => new Date() } = {}
 
 function parseJsonSafely(text) {
   if (typeof text !== "string" || new TextEncoder().encode(text).byteLength > MAX_SNAPSHOT_BYTES) {
-    throw new SnapshotValidationError("Файл расчета пуст или превышает безопасный лимит 10 МБ.", "SNAPSHOT_SIZE_LIMIT");
+    throw new SnapshotValidationError("Файл расчета пуст или превышает безопасный лимит 64 МБ.", "SNAPSHOT_SIZE_LIMIT");
   }
   try {
     return JSON.parse(text, (key, value) => {

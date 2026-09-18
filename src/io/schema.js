@@ -1,8 +1,12 @@
 import { MS_PER_DAY, addDays, clamp, daysBetween } from "../domain/date.js";
+import { bankOpeningFromPriorClose, BankSourceError, scopeBankPayments } from "../domain/bank-source.js";
 
 const REQUIRED_RECEIPT_HEADERS = ["invoice_id", "counterparty", "amount", "planned_date", "due_days"];
 const REQUIRED_OUTFLOW_HEADERS = ["date", "category", "amount", "criticality"];
 const REQUIRED_BALANCE_HEADERS = ["date", "opening_balance"];
+const REQUIRED_BANK_BALANCE_HEADERS = [
+  "bank_id", "legal_entity_id", "account_id", "currency", "balance_date", "as_of_date", "closing_balance_minor", "observed_at"
+];
 const REQUIRED_CANONICAL_RECEIVABLE_HEADERS = [
   "legal_entity_id", "receivable_id", "payment_schedule_id", "counterparty_id", "counterparty_name",
   "contract_id", "contractual_due_date", "original_amount_minor", "currency", "status"
@@ -39,6 +43,13 @@ const headerAliases = {
   category: ["category", "категория платежа", "категория", "назначение", "тип платежа"],
   criticality: ["criticality", "критичность", "важность", "тип критичности"],
   opening_balance: ["opening_balance", "входящий остаток", "входящий остаток денежных средств", "остаток денежных средств", "стартовый остаток", "остаток"],
+  bank_id: ["bank_id", "банк id"],
+  account_id: ["account_id", "счет банка id", "банковский счет id"],
+  bank_status: ["bank_status", "статус банковской операции"],
+  balance_date: ["balance_date", "дата закрытого остатка"],
+  as_of_date: ["as_of_date", "дата утреннего расчета"],
+  closing_balance_minor: ["closing_balance_minor", "закрытый остаток в копейках"],
+  observed_at: ["observed_at", "время получения данных"],
   legal_entity_id: ["legal_entity_id", "юрлицо id", "id юрлица"],
   receivable_id: ["receivable_id", "дз id", "id задолженности"],
   payment_schedule_id: ["payment_schedule_id", "транш id", "id графика оплаты"],
@@ -373,6 +384,39 @@ export function parseBalances(rows, fallbackDate, sheetName = "Остатки") 
   };
 }
 
+export function parseBankBalances(rows, sheetName = "BankBalances") {
+  const issues = createIssues();
+  const headers = validateHeaders(rows, REQUIRED_BANK_BALANCE_HEADERS, sheetName, issues);
+  const balances = nonEmptyRows(rows).map((row, index) => {
+    const item = rowObject(headers, row);
+    const rowLabel = `${sheetName}, строка ${index + 2}`;
+    const balanceDate = normalizeDate(item.balance_date);
+    if (!balanceDate) issues.errors.push(`${rowLabel}: некорректная balance_date.`);
+    const asOfDate = normalizeDate(item.as_of_date);
+    if (!asOfDate) issues.errors.push(`${rowLabel}: некорректная as_of_date.`);
+    const closingBalanceMinor = Number(item.closing_balance_minor);
+    if (!Number.isSafeInteger(closingBalanceMinor)) issues.errors.push(`${rowLabel}: closing_balance_minor должен быть целым числом копеек.`);
+    const observedAt = normalizedText(item.observed_at);
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(observedAt)
+      || Number.isNaN(Date.parse(observedAt))) {
+      issues.errors.push(`${rowLabel}: observed_at должен быть ISO-временем с часовым поясом.`);
+    }
+    return {
+      bankId: requiredText(item.bank_id, "bank_id", rowLabel, issues),
+      legalEntityId: requiredText(item.legal_entity_id, "legal_entity_id", rowLabel, issues),
+      accountId: requiredText(item.account_id, "account_id", rowLabel, issues),
+      currency: requiredText(item.currency, "currency", rowLabel, issues).toUpperCase(),
+      balanceDate,
+      asOfDate,
+      closingBalanceMinor,
+      observedAt
+    };
+  });
+  if (!balances.length) issues.errors.push(`Лист ${sheetName} не содержит закрытых остатков.`);
+  balances.importIssues = issues;
+  return balances;
+}
+
 function normalizedText(value) {
   return String(value ?? "").trim();
 }
@@ -440,6 +484,9 @@ export function parsePayments(rows, fallbackDate, sheetName = "Bank") {
     if (!bookingDate) issues.errors.push(`${rowLabel}: некорректная booking_date.`);
     return {
       paymentId: requiredText(item.payment_id, "payment_id", rowLabel, issues),
+      bankId: normalizedText(item.bank_id),
+      accountId: normalizedText(item.account_id),
+      bankStatus: normalizedText(item.bank_status).toLowerCase() || "booked",
       legalEntityId: requiredText(item.legal_entity_id, "legal_entity_id", rowLabel, issues),
       payerId: requiredText(item.payer_id, "payer_id", rowLabel, issues),
       payerName: requiredText(item.payer_name, "payer_name", rowLabel, issues),
@@ -464,6 +511,9 @@ export function parseAllocations(rows, sheetName = "Allocations") {
     return {
       allocationId: requiredText(item.allocation_id, "allocation_id", rowLabel, issues),
       paymentId: requiredText(item.payment_id, "payment_id", rowLabel, issues),
+      bankId: normalizedText(item.bank_id),
+      accountId: normalizedText(item.account_id),
+      legalEntityId: normalizedText(item.legal_entity_id),
       receivableId: requiredText(item.receivable_id, "receivable_id", rowLabel, issues),
       paymentScheduleId: requiredText(item.payment_schedule_id, "payment_schedule_id", rowLabel, issues),
       amountMinor: normalizeMinorAmount(item.amount_minor, "amount_minor", rowLabel, issues),
@@ -489,10 +539,43 @@ export function validateWorkbookSheets(sheets, { fallbackDate }) {
   const receiptsSheet = findSheet(sheets, ["Receipts", "Поступления", "Входящие", "Incoming"]);
   const outflowsSheet = findSheet(sheets, ["Outflows", "Исходящие", "Платежи", "Payments"]);
   const balanceSheet = findSheet(sheets, ["Balances", "Остатки", "Остатки денежных средств", "Cash"]);
+  const bankBalanceSheet = findSheet(sheets, ["BankBalances", "Банковские остатки"]);
   const modelSheet = findSheet(sheets, ["Лист1"]);
   const structuralErrors = [];
 
+  if (!canonicalReceivablesSheet && !receiptsSheet && !modelSheet && bankSheet && bankBalanceSheet && !outflowsSheet) {
+    if (balanceSheet) structuralErrors.push("Для банковского обновления используйте только BankBalances, без листа Остатки.");
+    if (structuralErrors.length) throw new WorkbookValidationError({ errors: structuralErrors, warnings: [], summary: "Банковское обновление не подготовлено." });
+    const bankBalances = parseBankBalances(bankBalanceSheet.rows, bankBalanceSheet.name);
+    const payments = parsePayments(bankSheet.rows, fallbackDate, bankSheet.name);
+    const allocations = allocationsSheet ? parseAllocations(allocationsSheet.rows, allocationsSheet.name)
+      : Object.assign([], { importIssues: { errors: [], warnings: [] } });
+    const errors = [...bankBalances.importIssues.errors, ...payments.importIssues.errors, ...allocations.importIssues.errors];
+    payments.forEach((payment, index) => {
+      if (!payment.bankId || !payment.accountId) errors.push(`${bankSheet.name}, строка ${index + 2}: нужны bank_id и account_id.`);
+    });
+    if (errors.length) throw new WorkbookValidationError({ errors, warnings: [], summary: "Банковское обновление не подготовлено." });
+    try {
+      const scoped = scopeBankPayments(payments, allocations);
+      const opening = bankOpeningFromPriorClose(bankBalances, scoped.payments);
+      return {
+        kind: "bank-update",
+        asOfDate: opening.asOfDate,
+        payments: scoped.payments,
+        allocations: scoped.allocations,
+        bankBalances,
+        balance: { date: opening.asOfDate, openingBalance: opening.openingBalanceMinor / 100 },
+        bankFreshness: { sourceCloseDate: opening.sourceCloseDate, observedAt: opening.observedAt, accountCount: opening.accountCount },
+        report: { errors: [], warnings: [], summary: `Банк готов: ${scoped.payments.length} операций, ${opening.accountCount} счетов; дата расчета ${opening.asOfDate.toLocaleDateString("ru-RU")}.` }
+      };
+    } catch (error) {
+      if (error instanceof BankSourceError) throw new WorkbookValidationError({ errors: [error.message], warnings: [], summary: "Банковское обновление не подготовлено." });
+      throw error;
+    }
+  }
+
   if (canonicalReceivablesSheet) {
+    if (balanceSheet && bankBalanceSheet) structuralErrors.push("Укажите один источник стартового остатка: Остатки или BankBalances.");
     if (!bankSheet) structuralErrors.push("Для канонического формата не найден обязательный лист Bank (или Банк). ");
     if (!outflowsSheet) structuralErrors.push("Для канонического формата не найден обязательный лист Outflows (или Исходящие). ");
     if (structuralErrors.length) {
@@ -505,6 +588,7 @@ export function validateWorkbookSheets(sheets, { fallbackDate }) {
     const balances = balanceSheet
       ? parseBalances(balanceSheet.rows, fallbackDate, balanceSheet.name)
       : { value: null, issues: { errors: [], warnings: ["Лист Остатки не найден. Используется значение из интерфейса."] } };
+    const bankBalances = bankBalanceSheet ? parseBankBalances(bankBalanceSheet.rows, bankBalanceSheet.name) : null;
     const asOfDate = balances.value?.date ?? fallbackDate;
     const receivables = parseCanonicalReceivables(canonicalReceivablesSheet.rows, asOfDate, canonicalReceivablesSheet.name);
     const payments = parsePayments(bankSheet.rows, asOfDate, bankSheet.name);
@@ -517,8 +601,14 @@ export function validateWorkbookSheets(sheets, { fallbackDate }) {
       ...payments.importIssues.errors,
       ...allocations.importIssues.errors,
       ...outflows.importIssues.errors,
-      ...balances.issues.errors
+      ...balances.issues.errors,
+      ...(bankBalances?.importIssues.errors ?? [])
     ];
+    if (bankBalances) payments.forEach((payment, index) => {
+      if (!payment.bankId || !payment.accountId) {
+        errors.push(`${bankSheet.name}, строка ${index + 2}: при BankBalances у каждой операции должны быть bank_id и account_id.`);
+      }
+    });
     const warnings = [
       ...receivables.importIssues.warnings,
       ...payments.importIssues.warnings,
@@ -528,17 +618,35 @@ export function validateWorkbookSheets(sheets, { fallbackDate }) {
     ];
     if (!receivables.length) errors.push("Лист Receivables не содержит строк данных.");
     if (errors.length) throw new WorkbookValidationError({ errors, warnings, summary: "Файл не загружен: найдены ошибки канонических данных." });
+    let scoped;
+    let bankOpening = null;
+    try {
+      scoped = scopeBankPayments(payments, allocations);
+      if (bankBalances) bankOpening = bankOpeningFromPriorClose(bankBalances, scoped.payments);
+    } catch (error) {
+      if (error instanceof BankSourceError) throw new WorkbookValidationError({ errors: [error.message], warnings, summary: "Файл не загружен: банковский факт или остаток требует проверки." });
+      throw error;
+    }
     return {
       kind: "canonical",
-      asOfDate,
+      asOfDate: bankOpening?.asOfDate ?? asOfDate,
       receivables,
-      payments,
-      allocations,
+      payments: scoped.payments,
+      allocations: scoped.allocations,
       outflows,
-      balance: balances.value,
+      balance: bankOpening ? { date: bankOpening.asOfDate, openingBalance: bankOpening.openingBalanceMinor / 100 } : balances.value,
+      bankFreshness: bankOpening ? {
+        sourceCloseDate: bankOpening.sourceCloseDate,
+        observedAt: bankOpening.observedAt,
+        accountCount: bankOpening.accountCount
+      } : null,
+      bankBalances,
       report: {
         errors: [],
-        warnings,
+        warnings: bankOpening
+          ? [...warnings.filter((item) => !item.includes("Лист Остатки не найден")),
+            `Банковский остаток на конец ${bankOpening.sourceCloseDate} по ${bankOpening.accountCount} счетам. Утренний расчет на ${bankOpening.asOfDate.toLocaleDateString("ru-RU")}.`]
+          : warnings,
         summary: `Канонические данные готовы: ${receivables.length} ДЗ, ${payments.length} банковских платежей, ${allocations.length} аллокаций.`
       }
     };
